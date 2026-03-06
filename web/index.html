@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Pattern Backtesting Viewer</title>
+</head>
+<body class="bg-bg text-text font-mono overflow-x-hidden">
+  <div id="app" class="max-w-[1600px] mx-auto px-5 py-4">
+
+    <h1 class="text-xl font-bold mb-2">Pattern Backtesting Viewer</h1>
+
+    <!-- Ticker selector -->
+    <div class="flex items-center gap-3 mb-1.5">
+      <select id="ticker-select"
+        class="bg-btn-bg border border-btn-border text-text font-mono text-base px-2 py-1 rounded cursor-pointer hover:border-accent"></select>
+    </div>
+
+    <!-- Toolbar: timeframe + zoom + snapshot -->
+    <div class="flex items-center gap-3 mb-1.5">
+      <div class="flex items-center gap-3 flex-1">
+        <!-- Timeframe buttons -->
+        <div class="flex gap-1" id="tf-buttons">
+          <button class="tf-btn bg-btn-bg border border-btn-border text-text-muted font-mono text-xs font-semibold px-2 py-0.5 rounded cursor-pointer hover:border-accent hover:text-accent" data-days="126">6M</button>
+          <button class="tf-btn bg-btn-bg border border-btn-border text-text-muted font-mono text-xs font-semibold px-2 py-0.5 rounded cursor-pointer hover:border-accent hover:text-accent" data-days="189">9M</button>
+          <button class="tf-btn bg-btn-bg border border-btn-border text-text-muted font-mono text-xs font-semibold px-2 py-0.5 rounded cursor-pointer hover:border-accent hover:text-accent" data-days="252">1Y</button>
+          <button class="tf-btn bg-btn-bg border border-btn-border text-text-muted font-mono text-xs font-semibold px-2 py-0.5 rounded cursor-pointer hover:border-accent hover:text-accent" data-days="504">2Y</button>
+        </div>
+        <!-- Zoom -->
+        <div class="flex items-center gap-1.5">
+          <label class="text-text-muted text-xs whitespace-nowrap">Zoom</label>
+          <input type="range" id="zoom-slider" min="0" max="100" value="0" class="w-[100px]" />
+          <span id="zoom-label" class="text-text text-xs min-w-[36px] text-right">100%</span>
+          <span class="text-text-dim text-xs whitespace-nowrap">&nbsp;&#8984;+/&#8984;-</span>
+        </div>
+      </div>
+      <div class="shrink-0">
+        <button id="snapshot-btn" title="Save PNG + CSV snapshot"
+          class="bg-btn-bg border border-btn-border text-text font-mono text-base px-2 py-1 rounded cursor-pointer hover:border-accent">&#128247; Snapshot</button>
+      </div>
+    </div>
+
+    <!-- OHLC bar + history/future labels -->
+    <div id="slider-labels" class="flex justify-between items-center mb-1">
+      <span class="text-candle-up text-sm whitespace-nowrap">&larr; History <span id="days-behind"></span></span>
+      <span id="now-ohlc" class="text-sm text-center flex items-center gap-2.5 flex-wrap justify-center"></span>
+      <span class="text-candle-down text-sm whitespace-nowrap"><span id="days-forward"></span> Future &rarr;</span>
+    </div>
+
+    <!-- Chart row -->
+    <div id="chart-row" class="flex items-stretch gap-1 mt-5">
+      <button id="nav-left" class="bg-btn-bg border border-btn-border text-text-muted text-lg px-2 rounded-md cursor-pointer flex items-center select-none hover:border-accent hover:text-accent active:bg-btn-active active:text-white" title="Pan left (⌘[)">&#x276E;</button>
+      <div id="chart-container" class="relative bg-chart-bg border border-border rounded-md overflow-visible flex-1 min-w-0">
+        <div id="tooltip" class="absolute pointer-events-none bg-bg-panel border border-border rounded-md px-2.5 py-2 text-xs leading-relaxed hidden z-10 min-w-[180px]"></div>
+        <div id="now-handle">
+          <div class="now-label">NOW</div>
+          <div class="now-thumb"></div>
+          <div class="now-line"></div>
+        </div>
+        <div id="now-grab"></div>
+      </div>
+      <button id="nav-right" class="bg-btn-bg border border-btn-border text-text-muted text-lg px-2 rounded-md cursor-pointer flex items-center select-none hover:border-accent hover:text-accent active:bg-btn-active active:text-white" title="Pan right (⌘])">&#x276F;</button>
+    </div>
+
+    <!-- Navigate slider -->
+    <div id="nav-row" class="flex items-center gap-2 mt-1.5 px-3 py-1.5 bg-bg-panel border border-border rounded-md">
+      <label class="text-text-muted text-xs whitespace-nowrap">Navigate</label>
+      <input type="range" id="nav-slider" min="0" max="1000" value="1000" class="flex-1" />
+    </div>
+
+    <!-- Trading days toggle -->
+    <div class="flex items-center gap-2 mt-1.5 px-3 py-1 bg-bg-panel border border-border rounded-md">
+      <label for="td-toggle" class="text-text-muted text-xs whitespace-nowrap cursor-pointer">Trading Days</label>
+      <label class="relative inline-block w-9 h-5 cursor-pointer">
+        <input type="checkbox" id="td-toggle" class="peer sr-only" />
+        <span class="absolute inset-0 bg-border rounded-full transition-colors duration-200 peer-checked:bg-accent"></span>
+        <span class="absolute left-0.5 top-0.5 w-4 h-4 bg-white rounded-full shadow transition-transform duration-200 peer-checked:translate-x-4"></span>
+      </label>
+    </div>
+
+    <!-- Layer panel -->
+    <div id="layer-header" class="mt-2 px-2.5 py-1 bg-bg border border-border border-b-0 rounded-t-md flex justify-between items-center text-sm font-semibold text-text-muted uppercase tracking-wide">
+      <span>Signals</span>
+    </div>
+    <div id="layer-panel" class="bg-bg-panel border border-border border-t-0 rounded-b-md overflow-hidden text-sm grid grid-cols-2"></div>
+  </div>
+
+  <script type="module" src="/src/main.ts"></script>
+</body>
+</html>

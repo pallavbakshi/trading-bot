@@ -1,0 +1,14 @@
+[project]
+name = "chart-scanner"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "dash>=4.0.0",
+    "matplotlib>=3.10.8",
+    "pandas>=3.0.1",
+    "plotly>=6.6.0",
+    "scipy>=1.17.1",
+    "ta-lib>=0.6.8",
+]
