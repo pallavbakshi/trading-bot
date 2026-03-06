@@ -30,6 +30,8 @@ const layers: Layer[] = [
 const margin = { top: 20, right: 60, bottom: 20, left: 60 };
 const volHeight = 80;
 const volGap = 8;
+const rsiHeight = 60;
+const rsiGap = 8;
 let W = 0;
 let H = 0;
 let priceH = 0;
@@ -43,6 +45,15 @@ let yVol: d3.ScaleLinear<number, number>;
 let visibleRange: [number, number] = [0, 0];
 const MIN_VISIBLE_BARS = 30;
 let dateMode: "calendar" | "trading" = "calendar";
+let showVolProfile = false;
+let showSMA = false;
+let showRSI = false;
+let showAVWAP = false;
+
+// ── Pre-computed indicator arrays ──────────────────────────────────────
+let sma50: number[] = [];
+let sma200: number[] = [];
+let rsiValues: number[] = [];
 
 // ── Pre-computed indices (rebuilt on ticker load) ────────────────────────
 let barByDate: Map<string, Bar> = new Map();
@@ -63,6 +74,11 @@ let gOverlay: d3.Selection<SVGGElement, unknown, HTMLElement, unknown>;
 let gXAxis: d3.Selection<SVGGElement, unknown, HTMLElement, unknown>;
 let gYAxis: d3.Selection<SVGGElement, unknown, HTMLElement, unknown>;
 let gYVolAxis: d3.Selection<SVGGElement, unknown, HTMLElement, unknown>;
+let gVolProfile: d3.Selection<SVGGElement, unknown, HTMLElement, unknown>;
+let gSMA: d3.Selection<SVGGElement, unknown, HTMLElement, unknown>;
+let gAVWAP: d3.Selection<SVGGElement, unknown, HTMLElement, unknown>;
+let gRSI: d3.Selection<SVGGElement, unknown, HTMLElement, unknown>;
+let gYRSIAxis: d3.Selection<SVGGElement, unknown, HTMLElement, unknown>;
 let gCrosshair: d3.Selection<SVGGElement, unknown, HTMLElement, unknown>;
 
 // ── Utilities ─────────────────────────────────────────────────────────
@@ -207,6 +223,41 @@ function precompute() {
       counts[i] = running;
     }
     panelCounts.push(counts);
+  }
+
+  // SMA 50 & 200
+  sma50 = new Array(bars.length).fill(NaN);
+  sma200 = new Array(bars.length).fill(NaN);
+  let sum50 = 0, sum200 = 0;
+  for (let i = 0; i < bars.length; i++) {
+    sum50 += bars[i].close;
+    sum200 += bars[i].close;
+    if (i >= 50) sum50 -= bars[i - 50].close;
+    if (i >= 200) sum200 -= bars[i - 200].close;
+    if (i >= 49) sma50[i] = sum50 / 50;
+    if (i >= 199) sma200[i] = sum200 / 200;
+  }
+
+  // RSI (14-period, Wilder's smoothing)
+  const rsiPeriod = 14;
+  rsiValues = new Array(bars.length).fill(NaN);
+  if (bars.length > rsiPeriod) {
+    let avgGain = 0, avgLoss = 0;
+    for (let i = 1; i <= rsiPeriod; i++) {
+      const delta = bars[i].close - bars[i - 1].close;
+      if (delta > 0) avgGain += delta; else avgLoss -= delta;
+    }
+    avgGain /= rsiPeriod;
+    avgLoss /= rsiPeriod;
+    rsiValues[rsiPeriod] = avgLoss === 0 ? 100 : 100 - 100 / (1 + avgGain / avgLoss);
+    for (let i = rsiPeriod + 1; i < bars.length; i++) {
+      const delta = bars[i].close - bars[i - 1].close;
+      const gain = delta > 0 ? delta : 0;
+      const loss = delta < 0 ? -delta : 0;
+      avgGain = (avgGain * (rsiPeriod - 1) + gain) / rsiPeriod;
+      avgLoss = (avgLoss * (rsiPeriod - 1) + loss) / rsiPeriod;
+      rsiValues[i] = avgLoss === 0 ? 100 : 100 - 100 / (1 + avgGain / avgLoss);
+    }
   }
 }
 
@@ -583,20 +634,34 @@ function isGeoEnabled(patternName: string): boolean {
 function setupSVG() {
   const container = document.getElementById("chart-container")!;
   W = container.clientWidth;
-  H = Math.max(500, Math.min(window.innerHeight - 200, 700));
-  priceH = H - margin.top - margin.bottom - volHeight - volGap;
+  const baseH = Math.max(500, Math.min(window.innerHeight - 200, 700));
+  priceH = baseH - margin.top - margin.bottom - volHeight - volGap;
+  const rsiExtra = rsiHeight + rsiGap; // always reserve space
+  H = baseH + rsiExtra;
 
   d3.select("#chart-container").select("svg").remove();
 
   svg = d3.select("#chart-container").append("svg")
     .attr("width", W).attr("height", H);
 
+  const chartW = W - margin.left - margin.right;
   svg.append("defs").append("clipPath").attr("id", "clip-price")
-    .append("rect").attr("width", W - margin.left - margin.right).attr("height", priceH);
+    .append("rect").attr("width", chartW).attr("height", priceH);
   svg.select("defs").append("clipPath").attr("id", "clip-vol")
-    .append("rect").attr("width", W - margin.left - margin.right).attr("height", volHeight);
+    .append("rect").attr("width", chartW).attr("height", volHeight);
+  svg.select("defs").append("clipPath").attr("id", "clip-rsi")
+    .append("rect").attr("width", chartW).attr("height", rsiHeight);
 
   gPrice = svg.append("g")
+    .attr("transform", `translate(${margin.left},${margin.top})`)
+    .attr("clip-path", "url(#clip-price)");
+  gVolProfile = svg.append("g")
+    .attr("transform", `translate(${margin.left},${margin.top})`)
+    .attr("clip-path", "url(#clip-price)");
+  gSMA = svg.append("g")
+    .attr("transform", `translate(${margin.left},${margin.top})`)
+    .attr("clip-path", "url(#clip-price)");
+  gAVWAP = svg.append("g")
     .attr("transform", `translate(${margin.left},${margin.top})`)
     .attr("clip-path", "url(#clip-price)");
   gOverlay = svg.append("g")
@@ -605,19 +670,28 @@ function setupSVG() {
   gVol = svg.append("g")
     .attr("transform", `translate(${margin.left},${margin.top + priceH + volGap})`)
     .attr("clip-path", "url(#clip-vol)");
+
+  const rsiTop = margin.top + priceH + volGap + volHeight + rsiGap;
+  gRSI = svg.append("g")
+    .attr("transform", `translate(${margin.left},${rsiTop})`)
+    .attr("clip-path", "url(#clip-rsi)");
+
+  const xAxisY = margin.top + priceH + volGap + volHeight + rsiExtra;
   gXAxis = svg.append("g").attr("class", "axis")
-    .attr("transform", `translate(${margin.left},${margin.top + priceH + volGap + volHeight})`);
+    .attr("transform", `translate(${margin.left},${xAxisY})`);
   gYAxis = svg.append("g").attr("class", "axis")
     .attr("transform", `translate(${W - margin.right},${margin.top})`);
   gYVolAxis = svg.append("g").attr("class", "axis")
     .attr("transform", `translate(${W - margin.right},${margin.top + priceH + volGap})`);
+  gYRSIAxis = svg.append("g").attr("class", "axis")
+    .attr("transform", `translate(${W - margin.right},${rsiTop})`);
   gCrosshair = svg.append("g")
     .attr("transform", `translate(${margin.left},${margin.top})`);
 
   svg.append("rect").attr("class", "mouse-rect")
     .attr("x", margin.left).attr("y", margin.top)
-    .attr("width", W - margin.left - margin.right)
-    .attr("height", priceH + volGap + volHeight)
+    .attr("width", chartW)
+    .attr("height", priceH + volGap + volHeight + rsiExtra)
     .attr("fill", "transparent")
     .on("mousemove", onMouseMove)
     .on("mouseleave", onMouseLeave);
@@ -664,6 +738,25 @@ function draw() {
       `<span class="ohlc-item"><span class="ohlc-label">C</span> <span class="${cls}">${nowBar.close.toFixed(2)}</span> <span class="${cls}">(${sign}${chg}%)</span></span>` +
       `<span class="ohlc-item"><span class="ohlc-label">Vol</span> <span style="color:var(--text)">${d3.format(",")(nowBar.volume)}</span></span>`;
   }
+
+  // Legend — only show entries for active overlays
+  const legendItems: string[] = [];
+  if (showSMA) {
+    legendItems.push(`<span class="flex items-center gap-1"><span style="display:inline-block;width:16px;height:2px;background:#f59e0b"></span>SMA50</span>`);
+    legendItems.push(`<span class="flex items-center gap-1"><span style="display:inline-block;width:16px;height:2px;background:#a855f7"></span>SMA200</span>`);
+  }
+  if (showAVWAP) {
+    legendItems.push(`<span class="flex items-center gap-1"><span style="display:inline-block;width:16px;height:2px;background:#ef4444;border-top:1px dashed #ef4444"></span>AVWAP↓</span>`);
+    legendItems.push(`<span class="flex items-center gap-1"><span style="display:inline-block;width:16px;height:2px;background:#22c55e;border-top:1px dashed #22c55e"></span>AVWAP↑</span>`);
+  }
+  if (showVolProfile) {
+    legendItems.push(`<span class="flex items-center gap-1"><span style="display:inline-block;width:16px;height:8px;background:#6366f1;opacity:0.35;border-radius:1px"></span>POC</span>`);
+    legendItems.push(`<span class="flex items-center gap-1"><span style="display:inline-block;width:16px;height:8px;background:#818cf8;opacity:0.25;border-radius:1px"></span>Value Area</span>`);
+  }
+  if (showRSI) {
+    legendItems.push(`<span class="flex items-center gap-1"><span style="display:inline-block;width:16px;height:2px;background:#6366f1"></span>RSI(14)</span>`);
+  }
+  document.getElementById("chart-legend")!.innerHTML = legendItems.join("");
 
   xScale = d3.scaleBand<string>()
     .domain(visible.map((b) => b.date))
@@ -766,12 +859,372 @@ function draw() {
     document.getElementById("days-forward")!.textContent = `(${fmtDateDiff(nowDate, lastDate)})`;
   }
 
+  drawVolumeProfile(visible, sliderDate);
+  drawSMA(visible);
+  drawAVWAP(visible, sliderDate);
   drawOverlays(visible, sliderDate);
+  drawRSI(visible, sliderDate);
   positionNowHandle();
   updateLayerPanel(sliderDate);
 }
 
 // ── Overlays ───────────────────────────────────────────────────────────
+// ── Volume Profile ──────────────────────────────────────────────────────
+function drawVolumeProfile(visible: Bar[], sliderDate: string) {
+  gVolProfile.selectAll("*").remove();
+  if (!showVolProfile || visible.length === 0) return;
+
+  // Only use history bars (up to and including NOW)
+  const histBars = visible.filter(b => b.date <= sliderDate);
+  if (histBars.length < 10) return;
+
+  const chartW = W - margin.left - margin.right;
+  const pLow = yPrice.domain()[0];
+  const pHigh = yPrice.domain()[1];
+  const NUM_BINS = 120;
+  const binSize = (pHigh - pLow) / NUM_BINS;
+  if (binSize <= 0) return;
+
+  // Build separate up/down histograms for delta coloring
+  const binsUp = new Float64Array(NUM_BINS);
+  const binsDown = new Float64Array(NUM_BINS);
+  for (const bar of histBars) {
+    const lo = Math.max(0, Math.min(NUM_BINS - 1, Math.floor((bar.low - pLow) / binSize)));
+    const hi = Math.max(0, Math.min(NUM_BINS - 1, Math.floor((bar.high - pLow) / binSize)));
+    const span = hi - lo + 1;
+    const volPerBin = bar.volume / span;
+    const isUp = bar.close >= bar.open;
+    for (let b = lo; b <= hi; b++) {
+      if (isUp) binsUp[b] += volPerBin;
+      else binsDown[b] += volPerBin;
+    }
+  }
+
+  // Total volume per bin
+  const bins = new Float64Array(NUM_BINS);
+  for (let i = 0; i < NUM_BINS; i++) bins[i] = binsUp[i] + binsDown[i];
+
+  // Find POC (max volume bin) and compute Value Area (70%)
+  let pocBin = 0;
+  let maxVol = 0;
+  let totalVol = 0;
+  for (let i = 0; i < NUM_BINS; i++) {
+    totalVol += bins[i];
+    if (bins[i] > maxVol) { maxVol = bins[i]; pocBin = i; }
+  }
+  if (maxVol === 0) return;
+
+  // Value Area: expand from POC until 70% of volume
+  const vaTarget = totalVol * 0.70;
+  let vaVol = bins[pocBin];
+  let vaLow = pocBin;
+  let vaHigh = pocBin;
+  while (vaVol < vaTarget && (vaLow > 0 || vaHigh < NUM_BINS - 1)) {
+    const belowVol = vaLow > 0 ? bins[vaLow - 1] : 0;
+    const aboveVol = vaHigh < NUM_BINS - 1 ? bins[vaHigh + 1] : 0;
+    if (belowVol >= aboveVol && vaLow > 0) {
+      vaLow--;
+      vaVol += bins[vaLow];
+    } else if (vaHigh < NUM_BINS - 1) {
+      vaHigh++;
+      vaVol += bins[vaHigh];
+    } else {
+      vaLow--;
+      vaVol += bins[vaLow];
+    }
+  }
+
+  // Max bar width = 35% of chart width, anchored to right edge
+  const maxBarW = chartW * 0.35;
+  const xVP = (vol: number) => (vol / maxVol) * maxBarW;
+  const barH = Math.max(1, priceH / NUM_BINS - 0.5);
+
+  // Value Area shading (full width)
+  const vaLowPrice = pLow + vaLow * binSize;
+  const vaHighPrice = pLow + (vaHigh + 1) * binSize;
+  gVolProfile.append("rect")
+    .attr("x", 0)
+    .attr("y", yPrice(vaHighPrice))
+    .attr("width", chartW)
+    .attr("height", yPrice(vaLowPrice) - yPrice(vaHighPrice))
+    .attr("fill", "#6366f1")
+    .attr("opacity", 0.04);
+
+  // Histogram bars — right-anchored, split into up (green) / down (red)
+  for (let i = 0; i < NUM_BINS; i++) {
+    if (bins[i] === 0) continue;
+    const y = yPrice(pLow + (i + 1) * binSize);
+    const totalW = xVP(bins[i]);
+    const upW = bins[i] > 0 ? (binsUp[i] / bins[i]) * totalW : 0;
+    const downW = totalW - upW;
+    const isPOC = i === pocBin;
+    const inVA = i >= vaLow && i <= vaHigh;
+    const opac = isPOC ? 0.45 : inVA ? 0.28 : 0.18;
+
+    // Down (red) portion — leftmost within the bar
+    if (downW > 0) {
+      gVolProfile.append("rect")
+        .attr("x", chartW - totalW)
+        .attr("y", y)
+        .attr("width", downW)
+        .attr("height", barH)
+        .attr("fill", C("--candle-down"))
+        .attr("opacity", opac)
+        .attr("rx", 1);
+    }
+    // Up (green) portion — rightmost within the bar
+    if (upW > 0) {
+      gVolProfile.append("rect")
+        .attr("x", chartW - upW)
+        .attr("y", y)
+        .attr("width", upW)
+        .attr("height", barH)
+        .attr("fill", C("--candle-up"))
+        .attr("opacity", opac)
+        .attr("rx", 1);
+    }
+  }
+
+  // POC line across full chart
+  const pocPrice = pLow + (pocBin + 0.5) * binSize;
+  gVolProfile.append("line")
+    .attr("x1", 0).attr("x2", chartW)
+    .attr("y1", yPrice(pocPrice)).attr("y2", yPrice(pocPrice))
+    .attr("stroke", "#6366f1")
+    .attr("stroke-width", 1)
+    .attr("stroke-dasharray", "6,3")
+    .attr("opacity", 0.5);
+
+  // POC label
+  gVolProfile.append("text")
+    .attr("x", 4)
+    .attr("y", yPrice(pocPrice) - 3)
+    .attr("text-anchor", "start")
+    .attr("font-size", "9px")
+    .attr("fill", "#6366f1")
+    .attr("opacity", 0.7)
+    .text(`POC ${pocPrice.toFixed(2)}`);
+
+  // VAH label
+  gVolProfile.append("text")
+    .attr("x", 4)
+    .attr("y", yPrice(vaHighPrice) - 3)
+    .attr("text-anchor", "start")
+    .attr("font-size", "9px")
+    .attr("fill", "#818cf8")
+    .attr("opacity", 0.6)
+    .text(`VAH ${vaHighPrice.toFixed(2)}`);
+
+  // VAL label
+  gVolProfile.append("text")
+    .attr("x", 4)
+    .attr("y", yPrice(vaLowPrice) + 10)
+    .attr("text-anchor", "start")
+    .attr("font-size", "9px")
+    .attr("fill", "#818cf8")
+    .attr("opacity", 0.6)
+    .text(`VAL ${vaLowPrice.toFixed(2)}`);
+}
+
+// ── SMA Lines (50 & 200) ────────────────────────────────────────────────
+function drawSMA(visible: Bar[]) {
+  gSMA.selectAll("*").remove();
+  if (!showSMA || visible.length === 0) return;
+
+  const candleW = xScale.bandwidth();
+  const line = d3.line<[string, number]>()
+    .defined(d => !isNaN(d[1]))
+    .x(d => (xScale(d[0]) ?? 0) + candleW / 2)
+    .y(d => yPrice(d[1]));
+
+  const data50: [string, number][] = [];
+  const data200: [string, number][] = [];
+  for (const bar of visible) {
+    const idx = barIdxByDate.get(bar.date);
+    if (idx !== undefined) {
+      data50.push([bar.date, sma50[idx]]);
+      data200.push([bar.date, sma200[idx]]);
+    }
+  }
+
+  // SMA50 — orange
+  gSMA.append("path")
+    .datum(data50).attr("fill", "none")
+    .attr("stroke", "#f59e0b").attr("stroke-width", 1.5)
+    .attr("opacity", 0.8).attr("d", line);
+
+  // SMA200 — purple
+  gSMA.append("path")
+    .datum(data200).attr("fill", "none")
+    .attr("stroke", "#a855f7").attr("stroke-width", 1.5)
+    .attr("opacity", 0.8).attr("d", line);
+
+  // End labels
+  const last50 = data50.filter(d => !isNaN(d[1]));
+  const last200 = data200.filter(d => !isNaN(d[1]));
+  if (last50.length > 0) {
+    const [date, val] = last50[last50.length - 1];
+    gSMA.append("text")
+      .attr("x", (xScale(date) ?? 0) + candleW / 2 + 4)
+      .attr("y", yPrice(val) + 3)
+      .attr("font-size", "9px").attr("fill", "#f59e0b").attr("opacity", 0.9)
+      .text(`SMA50`);
+  }
+  if (last200.length > 0) {
+    const [date, val] = last200[last200.length - 1];
+    gSMA.append("text")
+      .attr("x", (xScale(date) ?? 0) + candleW / 2 + 4)
+      .attr("y", yPrice(val) + 3)
+      .attr("font-size", "9px").attr("fill", "#a855f7").attr("opacity", 0.9)
+      .text(`SMA200`);
+  }
+}
+
+// ── Anchored VWAP ──────────────────────────────────────────────────────
+function drawAVWAP(visible: Bar[], sliderDate: string) {
+  gAVWAP.selectAll("*").remove();
+  if (!showAVWAP || visible.length === 0) return;
+
+  // Find anchor points: highest high and lowest low in history portion
+  const sliderPos = visible.findIndex(b => b.date > sliderDate);
+  const histEnd = sliderPos === -1 ? visible.length : sliderPos;
+  if (histEnd < 5) return;
+
+  let highIdx = 0, lowIdx = 0;
+  for (let i = 0; i < histEnd; i++) {
+    if (visible[i].high > visible[highIdx].high) highIdx = i;
+    if (visible[i].low < visible[lowIdx].low) lowIdx = i;
+  }
+
+  const candleW = xScale.bandwidth();
+  const line = d3.line<[string, number]>()
+    .x(d => (xScale(d[0]) ?? 0) + candleW / 2)
+    .y(d => yPrice(d[1]));
+
+  // Compute VWAP from anchor index forward
+  const computeVwap = (anchorIdx: number): [string, number][] => {
+    const points: [string, number][] = [];
+    let cumTPV = 0, cumV = 0;
+    for (let i = anchorIdx; i < visible.length; i++) {
+      const bar = visible[i];
+      const tp = (bar.high + bar.low + bar.close) / 3;
+      cumTPV += tp * bar.volume;
+      cumV += bar.volume;
+      if (cumV > 0) points.push([bar.date, cumTPV / cumV]);
+    }
+    return points;
+  };
+
+  // AVWAP from swing high (resistance) — red dashed
+  const vwapHigh = computeVwap(highIdx);
+  if (vwapHigh.length > 1) {
+    gAVWAP.append("path")
+      .datum(vwapHigh).attr("fill", "none")
+      .attr("stroke", "#ef4444").attr("stroke-width", 1.5)
+      .attr("stroke-dasharray", "4,2").attr("opacity", 0.7)
+      .attr("d", line);
+    const last = vwapHigh[vwapHigh.length - 1];
+    gAVWAP.append("text")
+      .attr("x", (xScale(last[0]) ?? 0) + candleW / 2 + 4)
+      .attr("y", yPrice(last[1]) + 3)
+      .attr("font-size", "9px").attr("fill", "#ef4444").attr("opacity", 0.8)
+      .text("AVWAP↓");
+  }
+
+  // AVWAP from swing low (support) — green dashed
+  const vwapLow = computeVwap(lowIdx);
+  if (vwapLow.length > 1) {
+    gAVWAP.append("path")
+      .datum(vwapLow).attr("fill", "none")
+      .attr("stroke", "#22c55e").attr("stroke-width", 1.5)
+      .attr("stroke-dasharray", "4,2").attr("opacity", 0.7)
+      .attr("d", line);
+    const last = vwapLow[vwapLow.length - 1];
+    gAVWAP.append("text")
+      .attr("x", (xScale(last[0]) ?? 0) + candleW / 2 + 4)
+      .attr("y", yPrice(last[1]) + 3)
+      .attr("font-size", "9px").attr("fill", "#22c55e").attr("opacity", 0.8)
+      .text("AVWAP↑");
+  }
+}
+
+// ── RSI Panel ──────────────────────────────────────────────────────────
+function drawRSI(visible: Bar[], sliderDate: string) {
+  gRSI.selectAll("*").remove();
+  gYRSIAxis.selectAll("*").remove();
+  if (!showRSI || visible.length === 0) return;
+
+  const chartW = W - margin.left - margin.right;
+  const textDim = C("--text-dim");
+  const axisColor = C("--border");
+  const gridColor = C("--grid");
+
+  const yRSI = d3.scaleLinear().domain([0, 100]).range([rsiHeight, 0]);
+
+  // Overbought / oversold shading
+  gRSI.append("rect")
+    .attr("x", 0).attr("y", yRSI(100))
+    .attr("width", chartW).attr("height", yRSI(70) - yRSI(100))
+    .attr("fill", C("--candle-down")).attr("opacity", 0.06);
+  gRSI.append("rect")
+    .attr("x", 0).attr("y", yRSI(30))
+    .attr("width", chartW).attr("height", yRSI(0) - yRSI(30))
+    .attr("fill", C("--candle-up")).attr("opacity", 0.06);
+
+  // Reference lines at 30, 50, 70
+  [30, 50, 70].forEach(level => {
+    gRSI.append("line")
+      .attr("x1", 0).attr("x2", chartW)
+      .attr("y1", yRSI(level)).attr("y2", yRSI(level))
+      .attr("stroke", gridColor)
+      .attr("stroke-dasharray", level === 50 ? "4,4" : "2,4")
+      .attr("opacity", level === 50 ? 0.6 : 0.4);
+  });
+
+  // RSI line
+  const candleW = xScale.bandwidth();
+  const rsiLine = d3.line<[string, number]>()
+    .defined(d => !isNaN(d[1]))
+    .x(d => (xScale(d[0]) ?? 0) + candleW / 2)
+    .y(d => yRSI(d[1]));
+
+  const data: [string, number][] = [];
+  for (const bar of visible) {
+    const idx = barIdxByDate.get(bar.date);
+    if (idx !== undefined) data.push([bar.date, rsiValues[idx]]);
+  }
+
+  const histData = data.filter(d => d[0] <= sliderDate);
+  const futureData = data.filter(d => d[0] > sliderDate);
+
+  if (histData.length > 0) {
+    gRSI.append("path")
+      .datum(histData).attr("fill", "none")
+      .attr("stroke", "#6366f1").attr("stroke-width", 1.5)
+      .attr("d", rsiLine);
+  }
+  if (futureData.length > 0) {
+    const connected = histData.length > 0
+      ? [histData[histData.length - 1], ...futureData] : futureData;
+    gRSI.append("path")
+      .datum(connected).attr("fill", "none")
+      .attr("stroke", "#6366f1").attr("stroke-width", 1)
+      .attr("opacity", 0.3).attr("d", rsiLine);
+  }
+
+  // RSI label
+  gRSI.append("text")
+    .attr("x", 4).attr("y", 10)
+    .attr("font-size", "9px").attr("fill", "#6366f1").attr("opacity", 0.7)
+    .text("RSI(14)");
+
+  // RSI Y-axis
+  const rsiAxis = d3.axisRight(yRSI).tickValues([30, 50, 70]).tickFormat(d3.format("d"));
+  gYRSIAxis.call(rsiAxis);
+  gYRSIAxis.selectAll("text").attr("fill", textDim);
+  gYRSIAxis.selectAll("line, path").attr("stroke", axisColor);
+}
+
 function drawOverlays(visible: Bar[], sliderDate: string) {
   gOverlay.selectAll("*").remove();
   if (!result) return;
@@ -1279,6 +1732,30 @@ document.getElementById("td-toggle")!.addEventListener("change", (e) => {
   draw();
 });
 
+// ── Volume Profile toggle ────────────────────────────────────────────────
+document.getElementById("vp-toggle")!.addEventListener("change", (e) => {
+  showVolProfile = (e.target as HTMLInputElement).checked;
+  draw();
+});
+
+// ── SMA toggle ──────────────────────────────────────────────────────────
+document.getElementById("sma-toggle")!.addEventListener("change", (e) => {
+  showSMA = (e.target as HTMLInputElement).checked;
+  draw();
+});
+
+// ── RSI toggle ──────────────────────────────────────────────────────────
+document.getElementById("rsi-toggle")!.addEventListener("change", (e) => {
+  showRSI = (e.target as HTMLInputElement).checked;
+  draw();
+});
+
+// ── AVWAP toggle ────────────────────────────────────────────────────────
+document.getElementById("avwap-toggle")!.addEventListener("change", (e) => {
+  showAVWAP = (e.target as HTMLInputElement).checked;
+  draw();
+});
+
 document.querySelectorAll(".tf-btn").forEach(btn => {
   btn.addEventListener("click", () => {
     const days = parseInt((btn as HTMLElement).dataset.days!);
@@ -1343,7 +1820,7 @@ document.getElementById("snapshot-btn")!.addEventListener("click", () => {
 
   // --- PNG: capture chart container directly ---
   import("html2canvas").then(({ default: html2canvas }) => {
-    const el = document.getElementById("chart-container")!;
+    const el = document.getElementById("snapshot-region")!;
     html2canvas(el, { backgroundColor: "#ffffff", scale: 2 }).then((canvas) => {
       canvas.toBlob((blob) => {
         if (!blob) return;
