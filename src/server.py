@@ -2,13 +2,20 @@
 
 Endpoints:
   GET /api/tickers         — list of available tickers
-  GET /api/ticker/<TICKER> — { bars: [...], result: {...} }
+  GET /api/ticker/<TICKER> — { daily: {...}, weekly: {...}, monthly: {...} }
+
+Each timeframe contains: bars, result (patterns/signals), sma50, sma200, rsi.
+All pre-computed and cached on first request.
 """
 
 import json
 import sys
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
+
+import numpy as np
+import pandas as pd
+import talib
 
 from src.loader import load_csv
 from src.scanner import scan_ticker
@@ -39,6 +46,103 @@ def _list_tickers(data_dirs: list[str]) -> list[str]:
     return sorted(set(tickers))
 
 
+def _aggregate_df(df: pd.DataFrame, freq: str) -> pd.DataFrame:
+    """Aggregate daily OHLCV DataFrame to weekly or monthly."""
+    # Ensure DatetimeIndex
+    if not isinstance(df.index, pd.DatetimeIndex):
+        df = df.copy()
+        df.index = pd.to_datetime(df.index)
+
+    if freq == "weekly":
+        # Group by Monday of each week
+        monday = df.index - pd.to_timedelta(df.index.weekday, unit="D")
+        grouper = monday
+    else:
+        grouper = df.index.to_period("M")
+
+    rows = []
+    indices = []
+    for _, group in df.groupby(grouper):
+        rows.append({
+            "Open": group["Open"].iloc[0],
+            "High": group["High"].max(),
+            "Low": group["Low"].min(),
+            "Close": group["Close"].iloc[-1],
+            "Volume": group["Volume"].sum(),
+        })
+        indices.append(group.index[-1])  # last trading day in period
+
+    result = pd.DataFrame(rows, index=pd.DatetimeIndex(indices))
+    return result
+
+
+def _df_to_bars(df: pd.DataFrame) -> list[dict]:
+    """Convert DataFrame to list of bar dicts."""
+    bars = []
+    for date, row in df.iterrows():
+        bars.append({
+            "date": str(date)[:10],
+            "open": round(float(row["Open"]), 4),
+            "high": round(float(row["High"]), 4),
+            "low": round(float(row["Low"]), 4),
+            "close": round(float(row["Close"]), 4),
+            "volume": int(row["Volume"]),
+        })
+    return bars
+
+
+def _compute_indicators(df: pd.DataFrame) -> dict:
+    """Compute SMA50, SMA200, RSI14 for a DataFrame."""
+    close = df["Close"].values.astype(np.float64)
+    sma50 = talib.SMA(close, timeperiod=50)
+    sma200 = talib.SMA(close, timeperiod=200)
+    rsi = talib.RSI(close, timeperiod=14)
+
+    def to_list(arr, decimals=4):
+        return [round(float(v), decimals) if not np.isnan(v) else None for v in arr]
+
+    return {
+        "sma50": to_list(sma50),
+        "sma200": to_list(sma200),
+        "rsi": to_list(rsi, 2),
+    }
+
+
+def _empty_result(ticker: str, df: pd.DataFrame) -> dict:
+    """Return an empty scan result for when scanning fails."""
+    dates = [str(d)[:10] for d in df.index]
+    return {
+        "ticker": ticker,
+        "bars": len(df),
+        "date_range": [dates[0], dates[-1]] if dates else ["", ""],
+        "candlestick_patterns": [],
+        "geometric_patterns": [],
+        "gaps": [],
+        "island_reversals": [],
+        "divergences": [],
+        "signals": [],
+        "support_resistance": [],
+        "rolling_sr": [],
+        "density_sr": [],
+    }
+
+
+def _build_timeframe(ticker: str, df: pd.DataFrame, result: dict | None = None) -> dict:
+    """Build complete timeframe data: bars + scan result + indicators."""
+    if result is None:
+        try:
+            result = scan_ticker(ticker, df)
+        except Exception as e:
+            print(f"  Warning: scan failed for {ticker}: {e}")
+            result = _empty_result(ticker, df)
+
+    return {
+        "bars": _df_to_bars(df),
+        "result": result,
+        **_compute_indicators(df),
+    }
+
+
 def _get_ticker_data(ticker: str, data_dirs: list[str], results_map: dict) -> dict | None:
     if ticker in _cache:
         return _cache[ticker]
@@ -48,24 +152,22 @@ def _get_ticker_data(ticker: str, data_dirs: list[str], results_map: dict) -> di
         return None
 
     df = load_csv(csv_path)
-    bars = []
-    for date, row in df.iterrows():
-        bars.append({
-            "date": str(date),
-            "open": round(float(row["Open"]), 4),
-            "high": round(float(row["High"]), 4),
-            "low": round(float(row["Low"]), 4),
-            "close": round(float(row["Close"]), 4),
-            "volume": int(row["Volume"]),
-        })
 
-    # Get scan results — from pre-computed file or scan live
-    result = results_map.get(ticker.upper())
-    if result is None:
-        print(f"  Scanning {ticker} live...")
-        result = scan_ticker(ticker, df)
+    # Daily: use pre-computed result if available
+    daily_result = results_map.get(ticker.upper())
+    if daily_result is None:
+        print(f"  Scanning {ticker} (daily)...")
 
-    data = {"bars": bars, "result": result}
+    # Aggregate to weekly/monthly
+    df_w = _aggregate_df(df, "weekly")
+    df_m = _aggregate_df(df, "monthly")
+    print(f"  Building {ticker}: D={len(df)} W={len(df_w)} M={len(df_m)} bars")
+
+    data = {
+        "daily": _build_timeframe(ticker, df, daily_result),
+        "weekly": _build_timeframe(ticker, df_w),
+        "monthly": _build_timeframe(ticker, df_m),
+    }
     _cache[ticker] = data
     return data
 

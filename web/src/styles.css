@@ -106,7 +106,8 @@ input[type="range"]::-moz-range-thumb {
   opacity: 0.3;
 }
 .tf-btn.active,
-.dm-btn.active {
+.dm-btn.active,
+.interval-btn.active {
   background: var(--color-btn-active);
   border-color: var(--color-btn-active);
   color: #fff;

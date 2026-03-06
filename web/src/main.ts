@@ -49,8 +49,11 @@ let showVolProfile = false;
 let showSMA = false;
 let showRSI = false;
 let showAVWAP = false;
+let timeframe: "daily" | "weekly" | "monthly" = "daily";
+let activeTfDays: number | null = null; // tracks 6M/9M/1Y/2Y selection
+let tickerData: import("./types").TickerData | null = null;
 
-// ── Pre-computed indicator arrays ──────────────────────────────────────
+// ── Pre-computed indicator arrays (from server) ──────────────────────────
 let sma50: number[] = [];
 let sma200: number[] = [];
 let rsiValues: number[] = [];
@@ -225,49 +228,19 @@ function precompute() {
     panelCounts.push(counts);
   }
 
-  // SMA 50 & 200
-  sma50 = new Array(bars.length).fill(NaN);
-  sma200 = new Array(bars.length).fill(NaN);
-  let sum50 = 0, sum200 = 0;
-  for (let i = 0; i < bars.length; i++) {
-    sum50 += bars[i].close;
-    sum200 += bars[i].close;
-    if (i >= 50) sum50 -= bars[i - 50].close;
-    if (i >= 200) sum200 -= bars[i - 200].close;
-    if (i >= 49) sma50[i] = sum50 / 50;
-    if (i >= 199) sma200[i] = sum200 / 200;
-  }
-
-  // RSI (14-period, Wilder's smoothing)
-  const rsiPeriod = 14;
-  rsiValues = new Array(bars.length).fill(NaN);
-  if (bars.length > rsiPeriod) {
-    let avgGain = 0, avgLoss = 0;
-    for (let i = 1; i <= rsiPeriod; i++) {
-      const delta = bars[i].close - bars[i - 1].close;
-      if (delta > 0) avgGain += delta; else avgLoss -= delta;
-    }
-    avgGain /= rsiPeriod;
-    avgLoss /= rsiPeriod;
-    rsiValues[rsiPeriod] = avgLoss === 0 ? 100 : 100 - 100 / (1 + avgGain / avgLoss);
-    for (let i = rsiPeriod + 1; i < bars.length; i++) {
-      const delta = bars[i].close - bars[i - 1].close;
-      const gain = delta > 0 ? delta : 0;
-      const loss = delta < 0 ? -delta : 0;
-      avgGain = (avgGain * (rsiPeriod - 1) + gain) / rsiPeriod;
-      avgLoss = (avgLoss * (rsiPeriod - 1) + loss) / rsiPeriod;
-      rsiValues[i] = avgLoss === 0 ? 100 : 100 - 100 / (1 + avgGain / avgLoss);
-    }
-  }
 }
 
 async function loadTicker(ticker: string) {
   currentTicker = ticker;
   d3.select("#ticker-select").property("value", ticker);
 
-  const data = await fetchTickerData(ticker);
-  bars = data.bars;
-  result = data.result;
+  tickerData = await fetchTickerData(ticker);
+  const tf = tickerData[timeframe];
+  bars = tf.bars;
+  result = tf.result;
+  sma50 = tf.sma50.map(v => v ?? NaN);
+  sma200 = tf.sma200.map(v => v ?? NaN);
+  rsiValues = tf.rsi.map(v => v ?? NaN);
 
   renderLayerPanel();
   precompute();
@@ -282,6 +255,48 @@ async function loadTicker(ticker: string) {
 
   setupSVG();
   draw();
+  positionNowHandle();
+}
+
+function switchTimeframe(tf: "daily" | "weekly" | "monthly") {
+  if (tf === timeframe) return;
+
+  // Remember current NOW date
+  const currentDate = bars[sliderIndex]?.date ?? "";
+
+  timeframe = tf;
+  const data = tickerData![tf];
+  bars = data.bars;
+  result = data.result;
+  sma50 = data.sma50.map(v => v ?? NaN);
+  sma200 = data.sma200.map(v => v ?? NaN);
+  rsiValues = data.rsi.map(v => v ?? NaN);
+  precompute();
+
+  // Find closest bar to previous NOW date
+  let bestIdx = 0;
+  for (let i = 0; i < bars.length; i++) {
+    if (bars[i].date <= currentDate) bestIdx = i;
+  }
+
+  sliderIndex = bestIdx;
+
+  // Update button active states
+  document.querySelectorAll(".interval-btn").forEach(btn => {
+    btn.classList.toggle("active", (btn as HTMLElement).dataset.interval === tf);
+  });
+
+  // Re-apply active timeframe window, or reset to full zoom
+  if (activeTfDays !== null) {
+    showTimeframe(activeTfDays);
+  } else {
+    visibleRange = [0, bars.length - 1];
+    const zoomSlider = document.getElementById("zoom-slider") as HTMLInputElement;
+    zoomSlider.value = "0";
+    document.getElementById("zoom-label")!.textContent = "100%";
+    (document.getElementById("nav-slider") as HTMLInputElement).value = "1000";
+    draw();
+  }
   positionNowHandle();
 }
 
@@ -639,7 +654,7 @@ function setupSVG() {
   const rsiExtra = rsiHeight + rsiGap; // always reserve space
   H = baseH + rsiExtra;
 
-  d3.select("#chart-container").select("svg").remove();
+  d3.select("#chart-container").selectAll("svg").remove();
 
   svg = d3.select("#chart-container").append("svg")
     .attr("width", W).attr("height", H);
@@ -1707,8 +1722,14 @@ document.getElementById("nav-slider")!.addEventListener("input", () => {
 
 // ── Timeframe buttons ────────────────────────────────────────────────────
 function showTimeframe(days: number) {
+  activeTfDays = days;
   const total = bars.length;
-  const count = Math.min(days, total);
+  // Convert daily trading days to bar count for current interval
+  let count: number;
+  if (timeframe === "weekly") count = Math.round(days / 5);
+  else if (timeframe === "monthly") count = Math.round(days / 21);
+  else count = days;
+  count = Math.min(count, total);
   const end = sliderIndex;
   const start = Math.max(0, end - count + 1);
   visibleRange = [start, end];
@@ -1763,6 +1784,14 @@ document.querySelectorAll(".tf-btn").forEach(btn => {
   });
 });
 
+// ── Interval buttons (D/W/M) ────────────────────────────────────────────
+document.querySelectorAll(".interval-btn").forEach(btn => {
+  btn.addEventListener("click", () => {
+    const tf = (btn as HTMLElement).dataset.interval as "daily" | "weekly" | "monthly";
+    switchTimeframe(tf);
+  });
+});
+
 // ── Nav buttons ─────────────────────────────────────────────────────────
 document.getElementById("nav-left")!.addEventListener("click", () => {
   const visibleCount = visibleRange[1] - visibleRange[0] + 1;
@@ -1805,6 +1834,17 @@ document.addEventListener("keydown", (e) => {
       if (e.shiftKey) step = 20;    // Shift+Arrow: 20 days
       const delta = e.key === "ArrowLeft" ? -step : step;
       sliderIndex = Math.max(0, Math.min(bars.length - 1, sliderIndex + delta));
+    }
+    // Auto-pan window to keep NOW visible
+    const visibleCount = visibleRange[1] - visibleRange[0] + 1;
+    if (sliderIndex < visibleRange[0]) {
+      const start = Math.max(0, sliderIndex);
+      visibleRange = [start, start + visibleCount - 1];
+      syncNavSlider();
+    } else if (sliderIndex > visibleRange[1]) {
+      const end = Math.min(bars.length - 1, sliderIndex);
+      visibleRange = [end - visibleCount + 1, end];
+      syncNavSlider();
     }
     draw();
   }

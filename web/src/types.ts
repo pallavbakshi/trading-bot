@@ -93,9 +93,18 @@ export interface TickerResult {
   density_sr: SRZone[];
 }
 
-export interface TickerData {
+export interface TimeframeData {
   bars: Bar[];
   result: TickerResult;
+  sma50: (number | null)[];
+  sma200: (number | null)[];
+  rsi: (number | null)[];
+}
+
+export interface TickerData {
+  daily: TimeframeData;
+  weekly: TimeframeData;
+  monthly: TimeframeData;
 }
 
 export type LayerKey = "sr" | "geometric" | "crosses" | "bb_squeeze" | "vol_climax" | "divergences" | "gaps";
