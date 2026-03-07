@@ -17,6 +17,13 @@ package-lock.json
 data/
 results/
 
+# Env
+.env
+.env.*
+
+# Server cache
+.cache/
+
 # OS
 .DS_Store
 

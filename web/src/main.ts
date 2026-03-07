@@ -1,5 +1,6 @@
 import "./styles.css";
 import * as d3 from "d3";
+import { initChat } from "./chat";
 import type {
   Bar,
   TickerResult,
@@ -8,22 +9,44 @@ import type {
   Layer,
 } from "./types";
 
+// ── Defaults (edit here to change initial state) ──────────────────────
+const DEFAULTS = {
+  interval: "daily" as "daily" | "weekly" | "monthly",
+  dateMode: "calendar" as "calendar" | "trading",
+  showVolProfile: false,
+  showSMA: false,
+  showRSI: false,
+  showAVWAP: false,
+  layers: {
+    sr: false,
+    geometric: false,
+    crosses: false,
+    bb_squeeze: false,
+    vol_climax: false,
+    divergences: false,
+    gaps: false,
+  },
+  geoEnabled: false,    // false = all off, true = all on
+  candleEnabled: false,  // false = all off, true = all on
+};
+
 // ── State ──────────────────────────────────────────────────────────────
 let bars: Bar[] = [];
 let result: TickerResult | null = null;
 let sliderIndex = 0;
-let tickers: string[] = [];
+interface TickerInfo { ticker: string; exchange: string; }
+let tickers: TickerInfo[] = [];
 let currentTicker = "";
 let isDark = false;
 
 const layers: Layer[] = [
-  { key: "sr",          label: "S/R",        active: true },
-  { key: "geometric",   label: "Geometric",  active: true },
-  { key: "crosses",     label: "GC / DC",    active: true },
-  { key: "bb_squeeze",  label: "BB Squeeze", active: false },
-  { key: "vol_climax",  label: "Vol Climax", active: false },
-  { key: "divergences", label: "Diverg.",    active: false },
-  { key: "gaps",        label: "Gaps",       active: false },
+  { key: "sr",          label: "S/R",        active: DEFAULTS.layers.sr },
+  { key: "geometric",   label: "Geometric",  active: DEFAULTS.layers.geometric },
+  { key: "crosses",     label: "GC / DC",    active: DEFAULTS.layers.crosses },
+  { key: "bb_squeeze",  label: "BB Squeeze", active: DEFAULTS.layers.bb_squeeze },
+  { key: "vol_climax",  label: "Vol Climax", active: DEFAULTS.layers.vol_climax },
+  { key: "divergences", label: "Diverg.",    active: DEFAULTS.layers.divergences },
+  { key: "gaps",        label: "Gaps",       active: DEFAULTS.layers.gaps },
 ];
 
 // ── Dimensions ─────────────────────────────────────────────────────────
@@ -41,16 +64,17 @@ let xScale: d3.ScaleBand<string>;
 let yPrice: d3.ScaleLinear<number, number>;
 let yVol: d3.ScaleLinear<number, number>;
 
-// ── Zoom state ─────────────────────────────────────────────────────────
+// ── View state ─────────────────────────────────────────────────────────
 let visibleRange: [number, number] = [0, 0];
 const MIN_VISIBLE_BARS = 30;
-let dateMode: "calendar" | "trading" = "calendar";
-let showVolProfile = false;
-let showSMA = false;
-let showRSI = false;
-let showAVWAP = false;
-let timeframe: "daily" | "weekly" | "monthly" = "daily";
-let activeTfDays: number | null = null; // tracks 6M/9M/1Y/2Y selection
+let dateMode = DEFAULTS.dateMode;
+let showVolProfile = DEFAULTS.showVolProfile;
+let showSMA = DEFAULTS.showSMA;
+let showRSI = DEFAULTS.showRSI;
+let showAVWAP = DEFAULTS.showAVWAP;
+let timeframe = DEFAULTS.interval;
+let activeTfDays: number | null = null; // tracks lookback selection
+let activeLfDays: number | null = null; // tracks lookforward selection
 let tickerData: import("./types").TickerData | null = null;
 
 // ── Pre-computed indicator arrays (from server) ──────────────────────────
@@ -124,9 +148,14 @@ const PATTERN_COLORS: Record<string, string> = {
 };
 
 // ── Data loading ───────────────────────────────────────────────────────
-async function fetchTickers(): Promise<string[]> {
+async function fetchTickers(): Promise<TickerInfo[]> {
   const resp = await fetch("/api/tickers");
-  return resp.json();
+  const data = await resp.json();
+  // Handle both old (string[]) and new ({ticker,exchange}[]) formats
+  if (data.length > 0 && typeof data[0] === "string") {
+    return data.map((t: string) => ({ ticker: t, exchange: "US" }));
+  }
+  return data;
 }
 
 async function fetchTickerData(ticker: string): Promise<TickerData> {
@@ -141,17 +170,64 @@ async function init() {
 
   const select = d3.select<HTMLSelectElement, unknown>("#ticker-select");
   select.selectAll("option").data(tickers).join("option")
-    .attr("value", (d) => d).text((d) => d);
+    .attr("value", (d) => d.ticker).text((d) => d.ticker);
   select.on("change", async function () { await loadTicker(this.value); });
 
   renderLayerPanel();
   initNowDrag();
 
-  await loadTicker(tickers[0]);
+  // Chat drawer (init early so it's always visible)
+  initChat(() => {
+    const tf = timeframe === "daily" ? "D" : timeframe === "weekly" ? "W" : "M";
+    const active: string[] = [];
+    if (showSMA) active.push("SMA50/200");
+    if (showRSI) active.push("RSI14");
+    if (showAVWAP) active.push("AVWAP");
+    if (showVolProfile) active.push("Volume Profile");
+    return `${tf}${active.length ? " | " + active.join(", ") : ""}`;
+  }, () => {
+    // Generate CSV from visible bars + indicators (no dates to avoid ticker identification)
+    const [vStart, vEnd] = visibleRange;
+    const header = ["day", "open", "high", "low", "close", "volume"];
+    if (showSMA) header.push("sma50", "sma200");
+    if (showRSI) header.push("rsi");
+    const rows = [header.join(",")];
+    for (let i = vStart; i <= vEnd && i < bars.length; i++) {
+      const b = bars[i];
+      const dayLabel = dateMode === "trading"
+        ? String(i - sliderIndex)
+        : b.date;
+      const cols: (string | number)[] = [dayLabel, b.open, b.high, b.low, b.close, b.volume];
+      if (showSMA) {
+        cols.push(isNaN(sma50[i]) ? "" : sma50[i]);
+        cols.push(isNaN(sma200[i]) ? "" : sma200[i]);
+      }
+      if (showRSI) {
+        cols.push(isNaN(rsiValues[i]) ? "" : rsiValues[i]);
+      }
+      rows.push(cols.join(","));
+    }
+    // Append volume profile summary if active
+    if (showVolProfile) {
+      const sliderDate = bars[sliderIndex]?.date ?? "";
+      const histBars = bars.slice(vStart, vEnd + 1).filter(b => b.date <= sliderDate);
+      const vp = computeVolumeProfileStats(histBars);
+      if (vp) {
+        rows.push("");
+        rows.push(`# Volume Profile: POC=${vp.poc} VAH=${vp.vah} VAL=${vp.val}`);
+      }
+    }
+    return rows.join("\n");
+  });
+
+  await loadTicker(tickers[0].ticker);
 
   window.addEventListener("resize", () => {
     if (bars.length > 0) { setupSVG(); draw(); }
   });
+
+  // CLI sidecar: poll for commands
+  startCommandPoll();
 }
 
 function precompute() {
@@ -230,9 +306,17 @@ function precompute() {
 
 }
 
-async function loadTicker(ticker: string) {
+async function loadTicker(ticker: string, force = false) {
+  if (!force && ticker === currentTicker && bars.length > 0) return;
   currentTicker = ticker;
   d3.select("#ticker-select").property("value", ticker);
+
+  // Show loading spinner
+  const chartContainer = document.getElementById("chart-container")!;
+  const overlay = document.createElement("div");
+  overlay.id = "loading-overlay";
+  overlay.innerHTML = `<div class="loading-spinner"></div>`;
+  chartContainer.appendChild(overlay);
 
   tickerData = await fetchTickerData(ticker);
   const tf = tickerData[timeframe];
@@ -252,10 +336,30 @@ async function loadTicker(ticker: string) {
   zoomSlider.value = "0";
   document.getElementById("zoom-label")!.textContent = "100%";
   (document.getElementById("nav-slider") as HTMLInputElement).value = "1000";
+  activeTfDays = null;
+  activeLfDays = null;
+  document.querySelectorAll(".tf-btn").forEach(b => b.classList.remove("active"));
+  document.querySelectorAll(".lf-btn").forEach(b => b.classList.remove("active"));
+
+  // Set date picker bounds
+  if (bars.length > 0) {
+    const minDate = bars[0].date;
+    const maxDate = bars[bars.length - 1].date;
+    for (const id of ["goto-date", "vdr-start", "vdr-end"]) {
+      const el = document.getElementById(id) as HTMLInputElement;
+      el.min = minDate;
+      el.max = maxDate;
+    }
+    (document.getElementById("vdr-start") as HTMLInputElement).value = "";
+    (document.getElementById("vdr-end") as HTMLInputElement).value = "";
+  }
 
   setupSVG();
   draw();
   positionNowHandle();
+
+  // Remove loading spinner
+  document.getElementById("loading-overlay")?.remove();
 }
 
 function switchTimeframe(tf: "daily" | "weekly" | "monthly") {
@@ -289,6 +393,8 @@ function switchTimeframe(tf: "daily" | "weekly" | "monthly") {
   // Re-apply active timeframe window, or reset to full zoom
   if (activeTfDays !== null) {
     showTimeframe(activeTfDays);
+  } else if (activeLfDays !== null) {
+    showLookforward(activeLfDays);
   } else {
     visibleRange = [0, bars.length - 1];
     const zoomSlider = document.getElementById("zoom-slider") as HTMLInputElement;
@@ -402,10 +508,7 @@ const CANDLE_CONTINUATION = [
   "STICKSANDWICH", "3LINESTRIKE", "2CROWS", "RISEFALL3METHODS", "TRISTAR",
 ];
 const ALL_CANDLE_TYPES = [...CANDLE_REVERSAL, ...CANDLE_CONTINUATION];
-const candleEnabled = new Set<string>(CANDLE_REVERSAL); // start with reversal on
-
-// Track which individual geometric pattern types are enabled
-const geoEnabled = new Set<string>([
+const ALL_GEO_TYPES = [
   "double_top", "double_bottom",
   "head_and_shoulders", "inverse_head_and_shoulders",
   "triple_top", "triple_bottom",
@@ -414,7 +517,9 @@ const geoEnabled = new Set<string>([
   "ascending_channel", "descending_channel", "horizontal_channel",
   "broadening_formation",
   "bull_flag", "bear_flag", "bull_pennant", "bear_pennant",
-]);
+];
+const candleEnabled = new Set<string>(DEFAULTS.candleEnabled ? ALL_CANDLE_TYPES : []);
+const geoEnabled = new Set<string>(DEFAULTS.geoEnabled ? ALL_GEO_TYPES : []);
 
 function geoIcon(color: string): string {
   return `<svg width="14" height="14"><circle cx="7" cy="7" r="4" fill="${color}" stroke="#0d1117" stroke-width="1"/></svg>`;
@@ -445,17 +550,7 @@ function buildPanelRows(): PanelRow[] {
   ];
 
   // ── Geometric: one row per pattern type ──
-  const geoTypes = [
-    "double_top", "double_bottom",
-    "head_and_shoulders", "inverse_head_and_shoulders",
-    "triple_top", "triple_bottom",
-    "ascending_triangle", "descending_triangle", "symmetrical_triangle",
-    "rising_wedge", "falling_wedge",
-    "ascending_channel", "descending_channel", "horizontal_channel",
-    "broadening_formation",
-    "bull_flag", "bear_flag", "bull_pennant", "bear_pennant",
-  ];
-  for (const gt of geoTypes) {
+  for (const gt of ALL_GEO_TYPES) {
     const color = PATTERN_COLORS[gt] ?? "#8b949e";
     rows.push({
       icon: geoIcon(color),
@@ -746,12 +841,20 @@ function draw() {
     const chg = ((nowBar.close - nowBar.open) / nowBar.open * 100).toFixed(2);
     const sign = up ? "+" : "";
     document.getElementById("now-ohlc")!.innerHTML =
-      `<span class="now-date">${sliderDate.slice(0, 10)}</span>` +
+      `<span class="now-date">Current Day</span>` +
       `<span class="ohlc-item"><span class="ohlc-label">O</span> <span class="${cls}">${nowBar.open.toFixed(2)}</span></span>` +
       `<span class="ohlc-item"><span class="ohlc-label">H</span> <span class="${cls}">${nowBar.high.toFixed(2)}</span></span>` +
       `<span class="ohlc-item"><span class="ohlc-label">L</span> <span class="${cls}">${nowBar.low.toFixed(2)}</span></span>` +
       `<span class="ohlc-item"><span class="ohlc-label">C</span> <span class="${cls}">${nowBar.close.toFixed(2)}</span> <span class="${cls}">(${sign}${chg}%)</span></span>` +
       `<span class="ohlc-item"><span class="ohlc-label">Vol</span> <span style="color:var(--text)">${d3.format(",")(nowBar.volume)}</span></span>`;
+    (document.getElementById("goto-date") as HTMLInputElement).value = sliderDate.slice(0, 10);
+  }
+
+  // Sync VDR with visible window
+  const [vr0, vr1] = visibleRange;
+  if (bars[vr0] && bars[vr1]) {
+    (document.getElementById("vdr-start") as HTMLInputElement).value = bars[vr0].date;
+    (document.getElementById("vdr-end") as HTMLInputElement).value = bars[vr1].date;
   }
 
   // Legend — only show entries for active overlays
@@ -789,7 +892,7 @@ function draw() {
   const nowIdx = sliderIndex - vi0; // index of NOW within visible array
   const xAxis = d3.axisBottom(xScale)
     .tickValues(xScale.domain().filter((_, i) => i % Math.max(1, Math.floor(visible.length / 20)) === 0))
-    .tickFormat((d, i, nodes) => {
+    .tickFormat((d: string) => {
       if (dateMode === "trading") {
         const barGlobalIdx = barIdxByDate.get(d) ?? 0;
         const delta = barGlobalIdx - sliderIndex;
@@ -798,7 +901,7 @@ function draw() {
       const [y, m, day] = d.split("-");
       return `${day}/${m}/${y.slice(2)}`;
     });
-  gXAxis.call(xAxis);
+  (gXAxis as any).call(xAxis);
   gXAxis.selectAll("text").attr("fill", textDim);
   gXAxis.selectAll("line, path").attr("stroke", axisColor);
 
@@ -833,9 +936,9 @@ function draw() {
     .attr("y2", (d) => yPrice(d.low))
     .attr("stroke", (d) => {
       const up = d.close >= d.open;
-      const future = d.date > sliderDate;
+      const isLookforward = d.date > sliderDate;
       const base = up ? upColor : downColor;
-      return future ? base.replace(")", ",0.25)").replace("rgb", "rgba") : base;
+      return isLookforward ? base.replace(")", ",0.25)").replace("rgb", "rgba") : base;
     })
     .attr("stroke-width", 1)
     .attr("opacity", (d) => d.date > sliderDate ? 0.35 : 1);
@@ -864,14 +967,14 @@ function draw() {
   if (dateMode === "trading") {
     const daysBehind = sliderIndex - vi0;
     const daysForward = vi1 - sliderIndex;
-    document.getElementById("days-behind")!.textContent = `(${daysBehind} trading days)`;
-    document.getElementById("days-forward")!.textContent = `(${daysForward} trading days)`;
+    document.getElementById("days-lookback")!.textContent = `(${daysBehind} trading days)`;
+    document.getElementById("days-lookforward")!.textContent = `(${daysForward} trading days)`;
   } else {
     const firstDate = new Date(visible[0].date);
     const nowDate = new Date(sliderDate);
     const lastDate = new Date(visible[visible.length - 1].date);
-    document.getElementById("days-behind")!.textContent = `(${fmtDateDiff(firstDate, nowDate)})`;
-    document.getElementById("days-forward")!.textContent = `(${fmtDateDiff(nowDate, lastDate)})`;
+    document.getElementById("days-lookback")!.textContent = `(${fmtDateDiff(firstDate, nowDate)})`;
+    document.getElementById("days-lookforward")!.textContent = `(${fmtDateDiff(nowDate, lastDate)})`;
   }
 
   drawVolumeProfile(visible, sliderDate);
@@ -881,15 +984,83 @@ function draw() {
   drawRSI(visible, sliderDate);
   positionNowHandle();
   updateLayerPanel(sliderDate);
+  postState();
+}
+
+function postState() {
+  const sliderDate = bars[sliderIndex]?.date ?? "";
+  const [v0, v1] = visibleRange;
+  const state = {
+    ticker: currentTicker,
+    interval: timeframe,
+    date: sliderDate,
+    vdr: [bars[v0]?.date ?? "", bars[v1]?.date ?? ""],
+    visible_bars: v1 - v0 + 1,
+    total_bars: bars.length,
+    lookback: activeTfDays,
+    lookforward: activeLfDays,
+    trading_days: dateMode === "trading",
+    volume_profile: showVolProfile,
+    sma: showSMA,
+    rsi: showRSI,
+    avwap: showAVWAP,
+  };
+  fetch("/api/state", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(state),
+  }).catch(() => {});
 }
 
 // ── Overlays ───────────────────────────────────────────────────────────
 // ── Volume Profile ──────────────────────────────────────────────────────
+function computeVolumeProfileStats(histBars: Bar[]): { poc: number; vah: number; val: number } | null {
+  if (histBars.length < 10) return null;
+  const prices = histBars.flatMap(b => [b.low, b.high]);
+  const pLow = Math.min(...prices);
+  const pHigh = Math.max(...prices);
+  const NUM_BINS = 120;
+  const binSize = (pHigh - pLow) / NUM_BINS;
+  if (binSize <= 0) return null;
+
+  const bins = new Float64Array(NUM_BINS);
+  for (const bar of histBars) {
+    const lo = Math.max(0, Math.min(NUM_BINS - 1, Math.floor((bar.low - pLow) / binSize)));
+    const hi = Math.max(0, Math.min(NUM_BINS - 1, Math.floor((bar.high - pLow) / binSize)));
+    const span = hi - lo + 1;
+    const volPerBin = bar.volume / span;
+    for (let b = lo; b <= hi; b++) bins[b] += volPerBin;
+  }
+
+  let pocBin = 0, maxVol = 0, totalVol = 0;
+  for (let i = 0; i < NUM_BINS; i++) {
+    totalVol += bins[i];
+    if (bins[i] > maxVol) { maxVol = bins[i]; pocBin = i; }
+  }
+  if (maxVol === 0) return null;
+
+  const vaTarget = totalVol * 0.70;
+  let vaVol = bins[pocBin], vaLow = pocBin, vaHigh = pocBin;
+  while (vaVol < vaTarget && (vaLow > 0 || vaHigh < NUM_BINS - 1)) {
+    const belowVol = vaLow > 0 ? bins[vaLow - 1] : 0;
+    const aboveVol = vaHigh < NUM_BINS - 1 ? bins[vaHigh + 1] : 0;
+    if (belowVol >= aboveVol && vaLow > 0) { vaLow--; vaVol += bins[vaLow]; }
+    else if (vaHigh < NUM_BINS - 1) { vaHigh++; vaVol += bins[vaHigh]; }
+    else { vaLow--; vaVol += bins[vaLow]; }
+  }
+
+  return {
+    poc: +(pLow + (pocBin + 0.5) * binSize).toFixed(2),
+    vah: +(pLow + (vaHigh + 1) * binSize).toFixed(2),
+    val: +(pLow + vaLow * binSize).toFixed(2),
+  };
+}
+
 function drawVolumeProfile(visible: Bar[], sliderDate: string) {
   gVolProfile.selectAll("*").remove();
   if (!showVolProfile || visible.length === 0) return;
 
-  // Only use history bars (up to and including NOW)
+  // Only use lookback bars (up to and including NOW)
   const histBars = visible.filter(b => b.date <= sliderDate);
   if (histBars.length < 10) return;
 
@@ -1100,7 +1271,7 @@ function drawAVWAP(visible: Bar[], sliderDate: string) {
   gAVWAP.selectAll("*").remove();
   if (!showAVWAP || visible.length === 0) return;
 
-  // Find anchor points: highest high and lowest low in history portion
+  // Find anchor points: highest high and lowest low in lookback portion
   const sliderPos = visible.findIndex(b => b.date > sliderDate);
   const histEnd = sliderPos === -1 ? visible.length : sliderPos;
   if (histEnd < 5) return;
@@ -1116,7 +1287,7 @@ function drawAVWAP(visible: Bar[], sliderDate: string) {
     .x(d => (xScale(d[0]) ?? 0) + candleW / 2)
     .y(d => yPrice(d[1]));
 
-  // Compute VWAP from anchor index forward
+  // Compute VWAP from anchor index onward
   const computeVwap = (anchorIdx: number): [string, number][] => {
     const points: [string, number][] = [];
     let cumTPV = 0, cumV = 0;
@@ -1514,7 +1685,7 @@ function onMouseMove(event: MouseEvent) {
   const change = ((bar.close - bar.open) / bar.open * 100).toFixed(2);
   const cls = up ? "price-up" : "price-down";
   const sign = up ? "+" : "";
-  // Collect active patterns for this date (only in history)
+  // Collect active patterns for this date (only in lookback)
   let patternsHtml = "";
   const sliderDate = bars[sliderIndex]?.date ?? "";
   if (result && bar.date <= sliderDate) {
@@ -1723,6 +1894,7 @@ document.getElementById("nav-slider")!.addEventListener("input", () => {
 // ── Timeframe buttons ────────────────────────────────────────────────────
 function showTimeframe(days: number) {
   activeTfDays = days;
+  activeLfDays = null;
   const total = bars.length;
   // Convert daily trading days to bar count for current interval
   let count: number;
@@ -1741,7 +1913,35 @@ function showTimeframe(days: number) {
 
   // Highlight active button
   document.querySelectorAll(".tf-btn").forEach(b => b.classList.remove("active"));
+  document.querySelectorAll(".lf-btn").forEach(b => b.classList.remove("active"));
   document.querySelector(`.tf-btn[data-days="${days}"]`)?.classList.add("active");
+
+  syncNavSlider();
+  draw();
+}
+
+function showLookforward(days: number) {
+  activeLfDays = days;
+  activeTfDays = null;
+  const total = bars.length;
+  let count: number;
+  if (timeframe === "weekly") count = Math.round(days / 5);
+  else if (timeframe === "monthly") count = Math.round(days / 21);
+  else count = days;
+  // Start from current NOW position, show lookforward
+  const start = sliderIndex;
+  const end = Math.min(total - 1, start + count - 1);
+  visibleRange = [start, end];
+
+  // Sync zoom slider
+  const zoomVal = Math.round(((total - (end - start + 1)) / (total - MIN_VISIBLE_BARS)) * 100);
+  (document.getElementById("zoom-slider") as HTMLInputElement).value = String(Math.max(0, Math.min(100, zoomVal)));
+  document.getElementById("zoom-label")!.textContent = `${Math.round(((end - start + 1) / total) * 100)}%`;
+
+  // Highlight active button
+  document.querySelectorAll(".tf-btn").forEach(b => b.classList.remove("active"));
+  document.querySelectorAll(".lf-btn").forEach(b => b.classList.remove("active"));
+  document.querySelector(`.lf-btn[data-days="${days}"]`)?.classList.add("active");
 
   syncNavSlider();
   draw();
@@ -1784,6 +1984,13 @@ document.querySelectorAll(".tf-btn").forEach(btn => {
   });
 });
 
+document.querySelectorAll(".lf-btn").forEach(btn => {
+  btn.addEventListener("click", () => {
+    const days = parseInt((btn as HTMLElement).dataset.days!);
+    showLookforward(days);
+  });
+});
+
 // ── Interval buttons (D/W/M) ────────────────────────────────────────────
 document.querySelectorAll(".interval-btn").forEach(btn => {
   btn.addEventListener("click", () => {
@@ -1802,8 +2009,243 @@ document.getElementById("nav-right")!.addEventListener("click", () => {
   panWindow(Math.max(1, Math.floor(visibleCount * 0.1)));
 });
 
+// ── CLI sidecar command poll ──────────────────────────────────────────────
+function startCommandPoll() {
+  setInterval(async () => {
+    try {
+      const resp = await fetch("/api/commands/poll");
+      const cmds = await resp.json();
+      for (const cmd of cmds) await executeCommand(cmd);
+    } catch { /* server not ready */ }
+  }, 200);
+}
+
+async function executeCommand(cmd: { action: string; [key: string]: unknown }) {
+  switch (cmd.action) {
+    case "ticker":
+      await loadTicker(String(cmd.value).toUpperCase());
+      break;
+
+    case "gtd":
+      goToDate(String(cmd.value));
+      break;
+
+    case "lookback": {
+      const presetMap: Record<string, number> = { "3M": 63, "6M": 126, "9M": 189, "1Y": 252, "2Y": 504 };
+      const days = presetMap[String(cmd.value).toUpperCase()];
+      if (days) showTimeframe(days);
+      break;
+    }
+
+    case "lookforward": {
+      const presetMap: Record<string, number> = { "3M": 63, "6M": 126, "9M": 189, "1Y": 252, "2Y": 504 };
+      const days = presetMap[String(cmd.value).toUpperCase()];
+      if (days) showLookforward(days);
+      break;
+    }
+
+    case "vdr": {
+      const s = String(cmd.start);
+      const e = String(cmd.end);
+      // Reuse the VDR inputs so applyVDR handles nearest-date logic
+      (document.getElementById("vdr-start") as HTMLInputElement).value = s;
+      (document.getElementById("vdr-end") as HTMLInputElement).value = e;
+      applyVDR();
+      break;
+    }
+
+    case "interval": {
+      const v = String(cmd.value).toUpperCase();
+      const map: Record<string, "daily" | "weekly" | "monthly"> = { D: "daily", W: "weekly", M: "monthly" };
+      const tf = map[v];
+      if (tf) {
+        switchTimeframe(tf);
+        document.querySelectorAll(".interval-btn").forEach(b => b.classList.toggle("active", b.getAttribute("data-interval") === tf));
+      }
+      break;
+    }
+
+    case "toggle": {
+      const key = String(cmd.key);
+      const on = cmd.value === true || cmd.value === "on";
+      if (key === "trading-days") {
+        dateMode = on ? "trading" : "calendar";
+        (document.getElementById("td-toggle") as HTMLInputElement).checked = on;
+      } else if (key === "vol-profile") {
+        showVolProfile = on;
+        (document.getElementById("vp-toggle") as HTMLInputElement).checked = on;
+      } else if (key === "sma") {
+        showSMA = on;
+        (document.getElementById("sma-toggle") as HTMLInputElement).checked = on;
+      } else if (key === "rsi") {
+        showRSI = on;
+        (document.getElementById("rsi-toggle") as HTMLInputElement).checked = on;
+      } else if (key === "avwap") {
+        showAVWAP = on;
+        (document.getElementById("avwap-toggle") as HTMLInputElement).checked = on;
+      }
+      draw();
+      break;
+    }
+
+    case "layer": {
+      const key = String(cmd.key);
+      const on = cmd.value === true || cmd.value === "on";
+      const layer = layers.find(l => l.key === key);
+      if (layer) {
+        layer.active = on;
+        renderLayerPanel();
+        draw();
+      }
+      break;
+    }
+
+    case "snapshot":
+      takeSnapshot(cmd.save_dir ? String(cmd.save_dir) : null, cmd.prefix ? String(cmd.prefix) : undefined);
+      break;
+
+    case "zoom": {
+      const count = Number(cmd.value);
+      if (count > 0) zoomCenteredOnNow(count);
+      break;
+    }
+
+    default:
+      console.warn("Unknown CLI command:", cmd);
+  }
+}
+
+// ── Ticker search modal (Cmd+K) ──────────────────────────────────────────
+function openTickerSearch() {
+  // Don't open if already open
+  if (document.getElementById("ticker-modal")) return;
+
+  const overlay = document.createElement("div");
+  overlay.id = "ticker-modal";
+  overlay.innerHTML = `
+    <div class="ticker-modal-backdrop"></div>
+    <div class="ticker-modal-content">
+      <div class="ticker-modal-header">
+        <input id="ticker-search-input" type="text" placeholder="Search ticker..." autocomplete="off" spellcheck="false" />
+        <kbd>ESC</kbd>
+      </div>
+      <div id="ticker-search-results" class="ticker-modal-results"></div>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+
+  const input = overlay.querySelector("#ticker-search-input") as HTMLInputElement;
+  const resultsEl = overlay.querySelector("#ticker-search-results") as HTMLElement;
+  let selectedIdx = 0;
+
+  function renderResults(query: string) {
+    let q = query.toUpperCase().trim();
+    let exchangeFilter: string | null = null;
+
+    // Support "NYSE:XXX", "NASDAQ:XXX", "NSE:XXX" prefix search
+    const colonIdx = q.indexOf(":");
+    if (colonIdx > 0) {
+      const prefix = q.slice(0, colonIdx);
+      const symbol = q.slice(colonIdx + 1).trim();
+      if (prefix === "NYSE" || prefix === "NASDAQ") {
+        exchangeFilter = "US";
+      } else if (prefix === "NSE") {
+        exchangeFilter = "NSE";
+      }
+      q = symbol;
+    }
+
+    let filtered = tickers.filter(t => {
+      if (exchangeFilter && t.exchange !== exchangeFilter) return false;
+      return !q || t.ticker.includes(q);
+    });
+    // Sort: exact prefix matches first
+    filtered.sort((a, b) => {
+      const aStart = a.ticker.startsWith(q) ? 0 : 1;
+      const bStart = b.ticker.startsWith(q) ? 0 : 1;
+      return aStart - bStart || a.ticker.localeCompare(b.ticker);
+    });
+    selectedIdx = 0;
+
+    const flag = (ex: string) => ex === "NSE" ? "\uD83C\uDDEE\uD83C\uDDF3" : "\uD83C\uDDFA\uD83C\uDDF8";
+
+    resultsEl.innerHTML = filtered.slice(0, 50).map((t, i) =>
+      `<div class="ticker-modal-item${i === 0 ? " selected" : ""}${t.ticker === currentTicker ? " current" : ""}" data-ticker="${t.ticker}">
+        <span class="ticker-modal-symbol">${t.ticker}</span>
+        <span class="ticker-modal-exchange">${flag(t.exchange)} ${t.exchange}</span>
+      </div>`
+    ).join("");
+
+    if (filtered.length === 0) {
+      resultsEl.innerHTML = `<div class="ticker-modal-empty">No tickers found</div>`;
+    }
+  }
+
+  function updateSelection() {
+    const items = resultsEl.querySelectorAll(".ticker-modal-item");
+    items.forEach((el, i) => el.classList.toggle("selected", i === selectedIdx));
+    items[selectedIdx]?.scrollIntoView({ block: "nearest" });
+  }
+
+  async function selectTicker() {
+    const items = resultsEl.querySelectorAll(".ticker-modal-item");
+    const item = items[selectedIdx] as HTMLElement | undefined;
+    if (!item) return;
+    const ticker = item.dataset.ticker!;
+    close();
+    if (ticker !== currentTicker) {
+      await loadTicker(ticker);
+    }
+  }
+
+  function close() {
+    overlay.remove();
+  }
+
+  input.addEventListener("input", () => renderResults(input.value));
+
+  input.addEventListener("keydown", (e) => {
+    e.stopPropagation();
+    const items = resultsEl.querySelectorAll(".ticker-modal-item");
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      selectedIdx = Math.min(selectedIdx + 1, items.length - 1);
+      updateSelection();
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      selectedIdx = Math.max(selectedIdx - 1, 0);
+      updateSelection();
+    } else if (e.key === "Enter") {
+      e.preventDefault();
+      selectTicker();
+    } else if (e.key === "Escape") {
+      e.preventDefault();
+      close();
+    }
+  });
+
+  resultsEl.addEventListener("click", (e) => {
+    const item = (e.target as HTMLElement).closest(".ticker-modal-item") as HTMLElement | null;
+    if (!item) return;
+    selectedIdx = Array.from(resultsEl.children).indexOf(item);
+    selectTicker();
+  });
+
+  overlay.querySelector(".ticker-modal-backdrop")!.addEventListener("click", close);
+
+  renderResults("");
+  input.focus();
+}
+
 // ── Keyboard shortcuts ─────────────────────────────────────────────────
 document.addEventListener("keydown", (e) => {
+  // Cmd+K : open ticker search modal
+  if ((e.metaKey || e.ctrlKey) && e.key === "k") {
+    e.preventDefault();
+    openTickerSearch();
+    return;
+  }
+
   // Cmd+= / Cmd+- : zoom centered on NOW
   if ((e.metaKey || e.ctrlKey) && (e.key === "=" || e.key === "+" || e.key === "-")) {
     e.preventDefault();
@@ -1850,44 +2292,102 @@ document.addEventListener("keydown", (e) => {
   }
 });
 
+// ── GoToDate ─────────────────────────────────────────────────────────────
+/** Find bar index for a date. Exact match first, else next trading day on or after target. */
+function findBarIdx(target: string): number | undefined {
+  let idx = barIdxByDate.get(target);
+  if (idx !== undefined) return idx;
+  const t = new Date(target).getTime();
+  for (let i = 0; i < bars.length; i++) {
+    if (new Date(bars[i].date).getTime() >= t) return i;
+  }
+  // Target is after all bars — return last bar
+  return bars.length > 0 ? bars.length - 1 : undefined;
+}
+
+function goToDate(target: string) {
+  const idx = findBarIdx(target);
+  if (idx === undefined) return;
+  sliderIndex = idx;
+  const vc = visibleRange[1] - visibleRange[0] + 1;
+  if (sliderIndex < visibleRange[0] || sliderIndex > visibleRange[1]) {
+    const half = Math.floor(vc / 2);
+    let s = Math.max(0, sliderIndex - half);
+    let e = s + vc - 1;
+    if (e >= bars.length) { e = bars.length - 1; s = e - vc + 1; }
+    visibleRange = [Math.max(0, s), e];
+  }
+  syncNavSlider();
+  draw();
+  positionNowHandle();
+}
+
+document.getElementById("goto-date")!.addEventListener("change", (e) => {
+  const target = (e.target as HTMLInputElement).value;
+  if (target) goToDate(target);
+});
+
+// ── Visible Date Range (VDR) ─────────────────────────────────────────────
+function applyVDR() {
+  const startVal = (document.getElementById("vdr-start") as HTMLInputElement).value;
+  const endVal = (document.getElementById("vdr-end") as HTMLInputElement).value;
+  if (!startVal || !endVal) return;
+
+  // Find bar indices: next trading day on or after target
+  let si = findBarIdx(startVal);
+  let ei = findBarIdx(endVal);
+  if (si === undefined) si = 0;
+  if (ei === undefined) ei = bars.length - 1;
+
+  if (si > ei) [si, ei] = [ei, si];
+  visibleRange = [si, ei];
+  activeTfDays = null;
+  activeLfDays = null;
+  document.querySelectorAll(".tf-btn").forEach(b => b.classList.remove("active"));
+  document.querySelectorAll(".lf-btn").forEach(b => b.classList.remove("active"));
+
+  // Sync zoom slider
+  const total = bars.length;
+  const zoomVal = Math.round(((total - (ei - si + 1)) / (total - MIN_VISIBLE_BARS)) * 100);
+  (document.getElementById("zoom-slider") as HTMLInputElement).value = String(Math.max(0, Math.min(100, zoomVal)));
+  document.getElementById("zoom-label")!.textContent = `${Math.round(((ei - si + 1) / total) * 100)}%`;
+
+  syncNavSlider();
+  draw();
+}
+
+document.getElementById("vdr-start")!.addEventListener("change", applyVDR);
+document.getElementById("vdr-end")!.addEventListener("change", applyVDR);
+
 // ── Snapshot (PNG + CSV) ─────────────────────────────────────────────────
-document.getElementById("snapshot-btn")!.addEventListener("click", () => {
+function buildSnapshotCsv(): string {
   const [vi0, vi1] = visibleRange;
   const visible = bars.slice(vi0, vi1 + 1);
   const sliderDate = bars[sliderIndex]?.date ?? "";
-  const ticker = currentTicker;
-  const prefix = `${ticker}_${sliderDate.slice(0, 10)}`;
 
-  // --- PNG: capture chart container directly ---
-  import("html2canvas").then(({ default: html2canvas }) => {
-    const el = document.getElementById("snapshot-region")!;
-    html2canvas(el, { backgroundColor: "#ffffff", scale: 2 }).then((canvas) => {
-      canvas.toBlob((blob) => {
-        if (!blob) return;
-        const a = document.createElement("a");
-        a.href = URL.createObjectURL(blob);
-        a.download = `${prefix}.png`;
-        a.click();
-        URL.revokeObjectURL(a.href);
-      }, "image/png");
-    });
-  });
-
-  // --- CSV: visible bars + active patterns ---
   const csvRows: string[] = [];
-  csvRows.push("date,open,high,low,close,volume,candlestick_patterns,geometric_patterns,signals,divergences,gaps,support_levels,resistance_levels");
+  const hdr = ["date", "open", "high", "low", "close", "volume"];
+  if (showSMA) hdr.push("sma50", "sma200");
+  if (showRSI) hdr.push("rsi");
+  hdr.push("candlestick_patterns", "geometric_patterns", "signals", "divergences", "gaps", "support_levels", "resistance_levels");
+  csvRows.push(hdr.join(","));
 
-  for (const bar of visible) {
+  for (let idx = vi0; idx <= vi1; idx++) {
+    const bar = bars[idx];
     const d = bar.date;
-    const inHistory = d <= sliderDate;
+    const inLookback = d <= sliderDate;
+
+    const dayLabel = dateMode === "trading"
+      ? String(idx - sliderIndex)
+      : d;
 
     let candles = "";
     let geos = "";
     let sigs = "";
     let divs = "";
-    let gaps = "";
+    let gapsStr = "";
 
-    if (inHistory && result) {
+    if (inLookback && result) {
       const cp = candleByDate.get(d);
       if (cp) candles = cp.map(p => `${p.pattern}(${p.direction})`).join("; ");
 
@@ -1905,13 +2405,12 @@ document.getElementById("snapshot-btn")!.addEventListener("click", () => {
       if (dp) divs = dp.map(v => `${v.pattern}(${v.direction})`).join("; ");
 
       const gp = gapsByDate.get(d);
-      if (gp) gaps = gp.map(g => `${g.pattern}(${g.gap_pct.toFixed(1)}%)`).join("; ");
+      if (gp) gapsStr = gp.map(g => `${g.pattern}(${g.gap_pct.toFixed(1)}%)`).join("; ");
     }
 
-    // Active S/R levels at this date
     const supports: number[] = [];
     const resistances: number[] = [];
-    if (inHistory) {
+    if (inLookback) {
       for (const z of srMerged) {
         if (z.start_date <= d && (z.end_date >= d || (!z.broken))) {
           if (z.broken && z.broken_date && z.broken_date < d) continue;
@@ -1922,21 +2421,74 @@ document.getElementById("snapshot-btn")!.addEventListener("click", () => {
     }
 
     const esc = (s: string) => `"${s.replace(/"/g, '""')}"`;
-    csvRows.push([
-      d, bar.open.toFixed(2), bar.high.toFixed(2), bar.low.toFixed(2), bar.close.toFixed(2), bar.volume,
-      esc(candles), esc(geos), esc(sigs), esc(divs), esc(gaps),
+    const cols: string[] = [
+      dayLabel, bar.open.toFixed(2), bar.high.toFixed(2), bar.low.toFixed(2), bar.close.toFixed(2), String(bar.volume),
+    ];
+    if (showSMA) {
+      cols.push(isNaN(sma50[idx]) ? "" : String(sma50[idx]));
+      cols.push(isNaN(sma200[idx]) ? "" : String(sma200[idx]));
+    }
+    if (showRSI) {
+      cols.push(isNaN(rsiValues[idx]) ? "" : String(rsiValues[idx]));
+    }
+    cols.push(esc(candles), esc(geos), esc(sigs), esc(divs), esc(gapsStr),
       esc(supports.map(l => l.toFixed(2)).join("; ")),
       esc(resistances.map(l => l.toFixed(2)).join("; ")),
-    ].join(","));
+    );
+    csvRows.push(cols.join(","));
   }
 
-  const csvBlob = new Blob([csvRows.join("\n")], { type: "text/csv" });
-  const csvA = document.createElement("a");
-  csvA.href = URL.createObjectURL(csvBlob);
-  csvA.download = `${prefix}.csv`;
-  csvA.click();
-  URL.revokeObjectURL(csvA.href);
-});
+  // Volume profile summary
+  if (showVolProfile) {
+    const histBars = visible.filter(b => b.date <= sliderDate);
+    const vp = computeVolumeProfileStats(histBars);
+    if (vp) {
+      csvRows.push("");
+      csvRows.push(`# Volume Profile: POC=${vp.poc} VAH=${vp.vah} VAL=${vp.val}`);
+    }
+  }
+
+  return csvRows.join("\n");
+}
+
+async function takeSnapshot(saveDir: string | null = null, customPrefix?: string) {
+  const sliderDate = bars[sliderIndex]?.date ?? "";
+  const prefix = customPrefix || `${currentTicker}_${sliderDate.slice(0, 10)}`;
+
+  const { default: html2canvas } = await import("html2canvas");
+  const el = document.getElementById("snapshot-region")!;
+  const canvas = await html2canvas(el, { backgroundColor: "#ffffff", scale: 2 });
+  const csv = buildSnapshotCsv();
+
+  if (saveDir) {
+    // CLI-triggered: POST data back to server for disk save
+    const pngDataUrl = canvas.toDataURL("image/png");
+    await fetch("/api/snapshot/save", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ save_dir: saveDir, prefix, png: pngDataUrl, csv }),
+    });
+  } else {
+    // Browser-triggered: download via blob
+    canvas.toBlob((blob) => {
+      if (!blob) return;
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = `${prefix}.png`;
+      a.click();
+      URL.revokeObjectURL(a.href);
+    }, "image/png");
+
+    const csvBlob = new Blob([csv], { type: "text/csv" });
+    const csvA = document.createElement("a");
+    csvA.href = URL.createObjectURL(csvBlob);
+    csvA.download = `${prefix}.csv`;
+    csvA.click();
+    URL.revokeObjectURL(csvA.href);
+  }
+}
+
+document.getElementById("snapshot-btn")!.addEventListener("click", () => takeSnapshot());
 
 // ── Start ──────────────────────────────────────────────────────────────
 init();

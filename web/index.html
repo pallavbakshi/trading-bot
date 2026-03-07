@@ -25,14 +25,6 @@
           <button class="interval-btn bg-btn-bg border border-btn-border text-text-muted font-mono text-xs font-semibold px-2 py-0.5 rounded cursor-pointer hover:border-accent hover:text-accent" data-interval="weekly">W</button>
           <button class="interval-btn bg-btn-bg border border-btn-border text-text-muted font-mono text-xs font-semibold px-2 py-0.5 rounded cursor-pointer hover:border-accent hover:text-accent" data-interval="monthly">M</button>
         </div>
-        <span class="text-border">|</span>
-        <!-- Timeframe buttons -->
-        <div class="flex gap-1" id="tf-buttons">
-          <button class="tf-btn bg-btn-bg border border-btn-border text-text-muted font-mono text-xs font-semibold px-2 py-0.5 rounded cursor-pointer hover:border-accent hover:text-accent" data-days="126">6M</button>
-          <button class="tf-btn bg-btn-bg border border-btn-border text-text-muted font-mono text-xs font-semibold px-2 py-0.5 rounded cursor-pointer hover:border-accent hover:text-accent" data-days="189">9M</button>
-          <button class="tf-btn bg-btn-bg border border-btn-border text-text-muted font-mono text-xs font-semibold px-2 py-0.5 rounded cursor-pointer hover:border-accent hover:text-accent" data-days="252">1Y</button>
-          <button class="tf-btn bg-btn-bg border border-btn-border text-text-muted font-mono text-xs font-semibold px-2 py-0.5 rounded cursor-pointer hover:border-accent hover:text-accent" data-days="504">2Y</button>
-        </div>
         <!-- Zoom -->
         <div class="flex items-center gap-1.5">
           <label class="text-text-muted text-xs whitespace-nowrap">Zoom</label>
@@ -41,6 +33,7 @@
           <span class="text-text-dim text-xs whitespace-nowrap">&nbsp;&#8984;+/&#8984;-</span>
         </div>
       </div>
+      <input type="date" id="goto-date" title="Go to date" class="bg-btn-bg border border-btn-border text-accent font-mono text-sm font-semibold px-2 py-0.5 rounded cursor-pointer hover:border-accent shrink-0" />
       <div class="shrink-0">
         <button id="snapshot-btn" title="Save PNG + CSV snapshot"
           class="bg-btn-bg border border-btn-border text-text font-mono text-base px-2 py-1 rounded cursor-pointer hover:border-accent">&#128247; Snapshot</button>
@@ -49,11 +42,11 @@
 
     <!-- Snapshot region: everything captured in PNG -->
     <div id="snapshot-region" class="bg-bg">
-      <!-- OHLC bar + history/future labels -->
+      <!-- OHLC bar + lookback/lookforward labels -->
       <div id="slider-labels" class="flex justify-between items-center mb-1">
-        <span class="text-candle-up text-sm whitespace-nowrap">&larr; History <span id="days-behind"></span></span>
+        <span class="text-candle-up text-sm whitespace-nowrap">&larr; Lookback <span id="days-lookback"></span></span>
         <span id="now-ohlc" class="text-sm text-center flex items-center gap-2.5 flex-wrap justify-center"></span>
-        <span class="text-candle-down text-sm whitespace-nowrap"><span id="days-forward"></span> Future &rarr;</span>
+        <span class="text-candle-down text-sm whitespace-nowrap"><span id="days-lookforward"></span> Lookforward &rarr;</span>
       </div>
 
       <!-- Legend -->
@@ -72,6 +65,31 @@
           <div id="now-grab"></div>
         </div>
         <button id="nav-right" class="bg-btn-bg border border-btn-border text-text-muted text-lg px-2 rounded-md cursor-pointer flex items-center select-none hover:border-accent hover:text-accent active:bg-btn-active active:text-white" title="Pan right (⌘])">&#x276F;</button>
+      </div>
+    </div>
+
+    <!-- Lookback / Lookforward buttons -->
+    <div class="flex items-center justify-between mt-1.5 px-3">
+      <div class="flex items-center gap-1" id="tf-buttons">
+        <span class="text-text-muted text-xs mr-1">Lookback</span>
+        <button class="tf-btn bg-btn-bg border border-btn-border text-text-muted font-mono text-xs font-semibold px-2 py-0.5 rounded cursor-pointer hover:border-accent hover:text-accent" data-days="63">3M</button>
+        <button class="tf-btn bg-btn-bg border border-btn-border text-text-muted font-mono text-xs font-semibold px-2 py-0.5 rounded cursor-pointer hover:border-accent hover:text-accent" data-days="126">6M</button>
+        <button class="tf-btn bg-btn-bg border border-btn-border text-text-muted font-mono text-xs font-semibold px-2 py-0.5 rounded cursor-pointer hover:border-accent hover:text-accent" data-days="189">9M</button>
+        <button class="tf-btn bg-btn-bg border border-btn-border text-text-muted font-mono text-xs font-semibold px-2 py-0.5 rounded cursor-pointer hover:border-accent hover:text-accent" data-days="252">1Y</button>
+        <button class="tf-btn bg-btn-bg border border-btn-border text-text-muted font-mono text-xs font-semibold px-2 py-0.5 rounded cursor-pointer hover:border-accent hover:text-accent" data-days="504">2Y</button>
+      </div>
+      <div class="flex items-center gap-1" id="vdr">
+        <input type="date" id="vdr-start" title="Visible date range start" class="bg-btn-bg border border-btn-border text-text font-mono text-xs px-1.5 py-0.5 rounded cursor-pointer hover:border-accent" />
+        <span class="text-text-dim text-xs">–</span>
+        <input type="date" id="vdr-end" title="Visible date range end" class="bg-btn-bg border border-btn-border text-text font-mono text-xs px-1.5 py-0.5 rounded cursor-pointer hover:border-accent" />
+      </div>
+      <div class="flex items-center gap-1" id="lf-buttons">
+        <span class="text-text-muted text-xs mr-1">Lookforward</span>
+        <button class="lf-btn bg-btn-bg border border-btn-border text-text-muted font-mono text-xs font-semibold px-2 py-0.5 rounded cursor-pointer hover:border-accent hover:text-accent" data-days="63">3M</button>
+        <button class="lf-btn bg-btn-bg border border-btn-border text-text-muted font-mono text-xs font-semibold px-2 py-0.5 rounded cursor-pointer hover:border-accent hover:text-accent" data-days="126">6M</button>
+        <button class="lf-btn bg-btn-bg border border-btn-border text-text-muted font-mono text-xs font-semibold px-2 py-0.5 rounded cursor-pointer hover:border-accent hover:text-accent" data-days="189">9M</button>
+        <button class="lf-btn bg-btn-bg border border-btn-border text-text-muted font-mono text-xs font-semibold px-2 py-0.5 rounded cursor-pointer hover:border-accent hover:text-accent" data-days="252">1Y</button>
+        <button class="lf-btn bg-btn-bg border border-btn-border text-text-muted font-mono text-xs font-semibold px-2 py-0.5 rounded cursor-pointer hover:border-accent hover:text-accent" data-days="504">2Y</button>
       </div>
     </div>
 

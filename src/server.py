@@ -20,8 +20,15 @@ import talib
 from src.loader import load_csv
 from src.scanner import scan_ticker
 
-# Cache scanned results so we don't re-scan on every request
-_cache: dict = {}
+# Cache serialized + gzipped JSON responses (in-memory + disk)
+_json_cache: dict[str, bytes] = {}
+_disk_cache_dir: Path | None = None
+# Command queue for CLI sidecar
+_command_queue: list[dict] = []
+# Snapshot result (set by frontend, polled by CLI)
+_snapshot_result: dict | None = None
+# Chart state (posted by frontend on every draw)
+_chart_state: dict = {}
 
 
 def _find_csv(ticker: str, data_dirs: list[str]) -> Path | None:
@@ -35,15 +42,26 @@ def _find_csv(ticker: str, data_dirs: list[str]) -> Path | None:
     return None
 
 
-def _list_tickers(data_dirs: list[str]) -> list[str]:
+def _list_tickers(data_dirs: list[str]) -> list[dict]:
+    seen = set()
     tickers = []
     for d in data_dirs:
         dp = Path(d)
         if not dp.exists():
             continue
+        # Determine exchange from directory name
+        dirname = dp.name.lower()
+        if dirname == "nse":
+            exchange = "NSE"
+        else:
+            exchange = "US"
         for f in sorted(dp.glob("*.csv")):
-            tickers.append(f.stem.upper())
-    return sorted(set(tickers))
+            t = f.stem.upper()
+            if t not in seen:
+                seen.add(t)
+                tickers.append({"ticker": t, "exchange": exchange})
+    tickers.sort(key=lambda x: x["ticker"])
+    return tickers
 
 
 def _aggregate_df(df: pd.DataFrame, freq: str) -> pd.DataFrame:
@@ -143,13 +161,21 @@ def _build_timeframe(ticker: str, df: pd.DataFrame, result: dict | None = None) 
     }
 
 
-def _get_ticker_data(ticker: str, data_dirs: list[str], results_map: dict) -> dict | None:
-    if ticker in _cache:
-        return _cache[ticker]
+def _get_ticker_data(ticker: str, data_dirs: list[str], results_map: dict) -> bool:
+    """Build ticker data and cache it. Returns True if data exists."""
+    if ticker in _json_cache:
+        return True
+
+    # Try disk cache first
+    if _disk_cache_dir:
+        disk_path = _disk_cache_dir / f"{ticker}.json.gz"
+        if disk_path.exists():
+            _json_cache[ticker] = disk_path.read_bytes()
+            return True
 
     csv_path = _find_csv(ticker, data_dirs)
     if csv_path is None:
-        return None
+        return False
 
     df = load_csv(csv_path)
 
@@ -168,8 +194,18 @@ def _get_ticker_data(ticker: str, data_dirs: list[str], results_map: dict) -> di
         "weekly": _build_timeframe(ticker, df_w),
         "monthly": _build_timeframe(ticker, df_m),
     }
-    _cache[ticker] = data
-    return data
+
+    # Serialize, gzip, cache in memory + disk
+    import gzip as gz
+    raw = json.dumps(data, default=str).encode()
+    compressed = gz.compress(raw)
+    _json_cache[ticker] = compressed
+
+    if _disk_cache_dir:
+        _disk_cache_dir.mkdir(parents=True, exist_ok=True)
+        (_disk_cache_dir / f"{ticker}.json.gz").write_bytes(compressed)
+
+    return True
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -185,18 +221,127 @@ class Handler(BaseHTTPRequestHandler):
 
         elif path.startswith("/api/ticker/"):
             ticker = path.split("/")[-1].upper()
-            data = _get_ticker_data(ticker, self.data_dirs, self.results_map)
-            if data is None:
+            # Serve from pre-cached gzipped JSON if available
+            if ticker in _json_cache:
+                accept = self.headers.get("Accept-Encoding", "")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Access-Control-Allow-Origin", "*")
+                if "gzip" in accept:
+                    self.send_header("Content-Encoding", "gzip")
+                    self.end_headers()
+                    self.wfile.write(_json_cache[ticker])
+                else:
+                    import gzip as gz
+                    self.end_headers()
+                    self.wfile.write(gz.decompress(_json_cache[ticker]))
+                return
+            found = _get_ticker_data(ticker, self.data_dirs, self.results_map)
+            if not found:
                 self.send_error(404, f"Ticker {ticker} not found")
                 return
-            self._json(data)
+            # Now it's in _json_cache, serve it
+            accept = self.headers.get("Accept-Encoding", "")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            if "gzip" in accept:
+                self.send_header("Content-Encoding", "gzip")
+                self.end_headers()
+                self.wfile.write(_json_cache[ticker])
+            else:
+                import gzip as gz
+                self.end_headers()
+                self.wfile.write(gz.decompress(_json_cache[ticker]))
+
+        elif path == "/api/commands/poll":
+            cmds = list(_command_queue)
+            _command_queue.clear()
+            self._json(cmds)
+
+        elif path == "/api/state":
+            self._json(_chart_state)
+
+        elif path == "/api/snapshot/result":
+            global _snapshot_result
+            if _snapshot_result:
+                result = _snapshot_result
+                _snapshot_result = None
+                self._json(result)
+            else:
+                self._json(None)
 
         else:
             self.send_error(404)
 
-    def _json(self, obj):
-        body = json.dumps(obj, default=str).encode()
+    def do_POST(self):
+        path = self.path.rstrip("/")
+        if path == "/api/command":
+            length = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(length)
+            try:
+                cmd = json.loads(body)
+                _command_queue.append(cmd)
+                self._json({"ok": True})
+            except json.JSONDecodeError:
+                self.send_error(400, "Invalid JSON")
+
+        elif path == "/api/state":
+            global _chart_state
+            length = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(length)
+            try:
+                _chart_state = json.loads(body)
+                self._json({"ok": True})
+            except json.JSONDecodeError:
+                self.send_error(400, "Invalid JSON")
+
+        elif path == "/api/snapshot/save":
+            import base64
+            global _snapshot_result
+            length = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(length)
+            try:
+                data = json.loads(body)
+                save_dir = Path(data.get("save_dir", "."))
+                save_dir.mkdir(parents=True, exist_ok=True)
+                prefix = data.get("prefix", "snapshot")
+                # Save PNG
+                png_path = save_dir / f"{prefix}.png"
+                png_b64 = data["png"].split(",", 1)[-1]
+                png_path.write_bytes(base64.b64decode(png_b64))
+                # Save CSV
+                csv_path = save_dir / f"{prefix}.csv"
+                csv_path.write_text(data["csv"])
+                _snapshot_result = {
+                    "ok": True,
+                    "png": str(png_path),
+                    "csv": str(csv_path),
+                }
+                self._json({"ok": True})
+            except Exception as e:
+                _snapshot_result = {"ok": False, "error": str(e)}
+                self.send_error(400, str(e))
+        else:
+            self.send_error(404)
+
+    def do_OPTIONS(self):
         self.send_response(200)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.end_headers()
+
+    def _json(self, obj):
+        import gzip as gz
+        body = json.dumps(obj, default=str).encode()
+        accept = self.headers.get("Accept-Encoding", "")
+        if "gzip" in accept:
+            body = gz.compress(body)
+            self.send_response(200)
+            self.send_header("Content-Encoding", "gzip")
+        else:
+            self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.send_header("Access-Control-Allow-Origin", "*")
         self.end_headers()
@@ -229,6 +374,44 @@ def run_server(data_dirs: list[str] = None, results_paths: list[str] = None,
     Handler.data_dirs = data_dirs
     Handler.results_map = results_map
 
+    # Disk cache for pre-built ticker data
+    global _disk_cache_dir
+    _disk_cache_dir = Path(".cache/ticker_data")
+    _disk_cache_dir.mkdir(parents=True, exist_ok=True)
+
+    # Pre-warm cache in background thread
+    tickers = _list_tickers(data_dirs)
+
+    import threading
+    import time
+
+    def _warm_cache():
+        t0 = time.time()
+        # Load from disk first (instant)
+        disk_hits = 0
+        for t in tickers:
+            tk = t["ticker"]
+            disk_path = _disk_cache_dir / f"{tk}.json.gz"
+            if disk_path.exists() and tk not in _json_cache:
+                _json_cache[tk] = disk_path.read_bytes()
+                disk_hits += 1
+        if disk_hits:
+            print(f"Loaded {disk_hits}/{len(tickers)} tickers from disk cache in {time.time()-t0:.1f}s")
+
+        # Build any missing tickers
+        missing = [t for t in tickers if t["ticker"] not in _json_cache]
+        if missing:
+            print(f"Building {len(missing)} uncached tickers...")
+            for i, t in enumerate(missing):
+                _get_ticker_data(t["ticker"], data_dirs, results_map)
+                if (i + 1) % 10 == 0:
+                    print(f"  Built {i + 1}/{len(missing)} tickers...")
+            print(f"Cache complete: {len(missing)} tickers built in {time.time()-t0:.1f}s")
+        else:
+            print(f"All {len(tickers)} tickers cached (disk)")
+
+    threading.Thread(target=_warm_cache, daemon=True).start()
+
     import socket
     server = HTTPServer((host, port), Handler, bind_and_activate=False)
     server.allow_reuse_address = True
@@ -238,7 +421,7 @@ def run_server(data_dirs: list[str] = None, results_paths: list[str] = None,
     server.server_activate()
     print(f"\nAPI server running at http://{host}:{port}")
     print(f"Data dirs: {data_dirs}")
-    print(f"Tickers: {len(_list_tickers(data_dirs))}\n")
+    print(f"Tickers: {len(tickers)}\n")
 
     try:
         server.serve_forever()

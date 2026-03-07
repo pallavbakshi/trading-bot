@@ -170,4 +170,7 @@ def scan_all(data_dir: str = "data", output_dir: str = "results"):
 
 
 if __name__ == "__main__":
-    scan_all()
+    import sys
+    data_dir = sys.argv[1] if len(sys.argv) > 1 else "data"
+    output_dir = sys.argv[2] if len(sys.argv) > 2 else "results"
+    scan_all(data_dir=data_dir, output_dir=output_dir)
