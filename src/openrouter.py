@@ -10,11 +10,15 @@ Usage:
 
 import base64
 import json
+import logging
 import os
+import random
 import time
 import urllib.request
 from pathlib import Path
 from uuid import uuid4
+
+log = logging.getLogger("openrouter")
 
 API_URL = "https://openrouter.ai/api/v1/chat/completions"
 
@@ -38,17 +42,47 @@ SYSTEM_PROMPT = (
 CHAT_DIR = Path(".cache/chats")
 
 
-def _get_api_key() -> str:
-    key = os.environ.get("OPENROUTER_API_KEY", "")
-    if not key:
-        env_file = Path("web/.env")
+def _load_env_keys() -> list[str]:
+    """Load all OPENROUTER_API_KEY* from environment and .env files."""
+    env_vars = {}
+
+    # Read .env files (later files override earlier)
+    for env_path in ["web/.env", ".env"]:
+        env_file = Path(env_path)
         if env_file.exists():
             for line in env_file.read_text().splitlines():
-                if line.startswith("OPENROUTER_API_KEY="):
-                    key = line.split("=", 1)[1].strip().strip("\"'")
-                    break
-    if not key:
-        raise ValueError("OPENROUTER_API_KEY not set in environment or web/.env")
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    k, v = line.split("=", 1)
+                    env_vars[k.strip()] = v.strip().strip("\"'")
+
+    # os.environ takes precedence over file values
+    env_vars.update(os.environ)
+
+    # Collect all matching keys: OPENROUTER_API_KEY, OPENROUTER_API_KEY_01, etc.
+    keys = []
+    for k, v in sorted(env_vars.items()):
+        if k.startswith("OPENROUTER_API_KEY") and v:
+            keys.append(v)
+            log.debug("Found key %s = ...%s", k, v[-4:])
+
+    unique = list(set(keys))
+    log.debug("Loaded %d keys (%d unique)", len(keys), len(unique))
+    return unique
+
+
+_api_keys: list[str] | None = None
+
+
+def _get_api_key() -> str:
+    """Return a random API key from the pool."""
+    global _api_keys
+    if _api_keys is None:
+        _api_keys = _load_env_keys()
+    if not _api_keys:
+        raise ValueError("No OPENROUTER_API_KEY* found in environment or web/.env")
+    key = random.choice(_api_keys)
+    log.debug("Using API key ...%s (%d keys in pool)", key[-4:], len(_api_keys))
     return key
 
 
@@ -112,13 +146,11 @@ class Chat:
 
         # API call (model param overrides chat default for this turn)
         use_model = model or self.model
-        api_key = _get_api_key()
         # Strip [image] placeholders from history (persisted chats don't store base64)
         def clean_msg(msg):
+            # Strip ALL images from history — only the current message keeps its image
             if isinstance(msg["content"], list):
-                parts = [p for p in msg["content"]
-                         if not (p.get("type") == "image_url"
-                                 and p.get("image_url", {}).get("url") == "[image]")]
+                parts = [p for p in msg["content"] if p.get("type") != "image_url"]
                 if not parts:
                     return None
                 return {**msg, "content": parts}
@@ -134,24 +166,54 @@ class Chat:
             ],
         }
         data = json.dumps(payload).encode()
-        req = urllib.request.Request(
-            API_URL,
-            data=data,
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-            },
-        )
 
-        try:
-            with urllib.request.urlopen(req, timeout=120) as resp:
-                result = json.loads(resp.read())
-        except urllib.error.HTTPError as e:
-            body = e.read().decode()
-            raise RuntimeError(f"OpenRouter API error {e.code}: {body}") from e
+        max_retries = 3
+        retryable = {429, 500, 502, 503, 504}
+        result = None
 
-        if "error" in result:
-            raise RuntimeError(f"OpenRouter error: {result['error']}")
+        for attempt in range(1, max_retries + 1):
+            api_key = _get_api_key()  # pick a (possibly different) key each attempt
+            req = urllib.request.Request(
+                API_URL,
+                data=data,
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
+            )
+            try:
+                with urllib.request.urlopen(req, timeout=120) as resp:
+                    result = json.loads(resp.read())
+                # OpenRouter sometimes returns HTTP 200 with an error body
+                if "error" in result:
+                    err = result["error"]
+                    code = err.get("code", 500) if isinstance(err, dict) else 500
+                    if code in retryable and attempt < max_retries:
+                        wait = 2 ** attempt + random.random()
+                        log.warning("OpenRouter app error %s (attempt %d/%d), retrying in %.1fs...",
+                                    code, attempt, max_retries, wait)
+                        time.sleep(wait)
+                        continue
+                    raise RuntimeError(f"OpenRouter error: {result['error']}")
+                break
+            except urllib.error.HTTPError as e:
+                body = e.read().decode()
+                if e.code in retryable and attempt < max_retries:
+                    wait = 2 ** attempt + random.random()
+                    log.warning("OpenRouter %d (attempt %d/%d), retrying in %.1fs...",
+                                e.code, attempt, max_retries, wait)
+                    time.sleep(wait)
+                    continue
+                raise RuntimeError(f"OpenRouter API error {e.code}: {body}") from e
+            except (urllib.error.URLError, TimeoutError) as e:
+                if attempt < max_retries:
+                    wait = 2 ** attempt + random.random()
+                    log.warning("OpenRouter network error (attempt %d/%d): %s, retrying in %.1fs...",
+                                attempt, max_retries, e, wait)
+                    time.sleep(wait)
+                    continue
+                raise RuntimeError(f"OpenRouter network error: {e}") from e
+
         reply = result["choices"][0]["message"]["content"]
         # Only persist after successful response
         self.messages.append(user_msg)

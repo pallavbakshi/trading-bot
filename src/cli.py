@@ -167,6 +167,15 @@ def main():
     cl = sub.add_parser("chatlog", help="Print chat history")
     cl.add_argument("chat_id", help="Chat ID to display")
 
+    # report (re-evaluate existing results)
+    rp = sub.add_parser("report", help="Re-evaluate existing backtest results and print report")
+    rp.add_argument("ticker", help="Ticker symbol (e.g. NVDA, AAPL)")
+    rp.add_argument("--start", "-s", help="Start date filter (YYYY-MM-DD)")
+    rp.add_argument("--end", "-e", help="End date filter (YYYY-MM-DD)")
+    rp.add_argument("--output", default="results/backtest", help="Output root directory")
+    rp.add_argument("--capital", type=float, default=100000)
+    rp.add_argument("--per-trade", type=float, default=100)
+
     # backtest
     bt = sub.add_parser("backtest", help="Run automated backtest across dates")
     bt.add_argument("ticker", help="Ticker symbol (e.g. NVDA, AAPL)")
@@ -184,6 +193,8 @@ def main():
                      help="Starting capital (default: 100000)")
     bt.add_argument("--per-trade", type=float, default=100,
                      help="Dollars allocated per trade (default: 100)")
+    bt.add_argument("--concurrency", type=int, default=5,
+                     help="Max parallel OpenRouter calls (default: 5)")
 
     args = p.parse_args()
     cmd_name = args.command
@@ -290,6 +301,35 @@ def main():
         chat = Chat.load(args.chat_id)
         chat.print_history()
 
+    elif cmd_name == "report":
+        from src.backtest import reprocess_results, _print_report
+        from src.loader import load_csv
+        ticker = args.ticker.upper()
+        csv_path = None
+        for d in ["data", "data/nse"]:
+            for name in [f"{ticker.lower()}.csv",
+                         f"{ticker.lower().replace('&', '_')}.csv"]:
+                candidate = Path(d) / name
+                if candidate.exists():
+                    csv_path = candidate
+                    break
+            if csv_path:
+                break
+        if csv_path is None:
+            print(f"No CSV found for {ticker}", file=sys.stderr)
+            sys.exit(1)
+        df = load_csv(csv_path)
+        output_dir = Path(args.output)
+        print(f"Reprocessing {ticker} results...")
+        trades = reprocess_results(ticker, output_dir, df,
+                                   getattr(args, "start", None),
+                                   getattr(args, "end", None))
+        if trades:
+            model = next((t.get("model") for t in trades if t.get("model")), "unknown")
+            lookback = next((t.get("lookback") for t in trades if t.get("lookback")), "6M")
+            _print_report(trades, ticker, model, lookback,
+                          args.capital, args.per_trade, output_dir / ticker)
+
     elif cmd_name == "backtest":
         from src.backtest import main as backtest_main
         # Forward args to backtest module by rebuilding sys.argv
@@ -310,6 +350,8 @@ def main():
             argv.extend(["--capital", str(args.capital)])
         if args.per_trade != 100:
             argv.extend(["--per-trade", str(args.per_trade)])
+        if args.concurrency != 5:
+            argv.extend(["--concurrency", str(args.concurrency)])
         sys.argv = argv
         backtest_main()
 
