@@ -42,7 +42,7 @@ def fetch_transcript(url: str) -> dict:
 
     # Try English first, then fall back to any available language
     try:
-        transcript = api.fetch(video_id, languages=["en"])
+        transcript = api.fetch(video_id, languages=["en", "hi"])
     except Exception:
         pass
 
