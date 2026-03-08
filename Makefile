@@ -1,4 +1,4 @@
-.PHONY: dev api web scan install
+.PHONY: dev api web scan install check-remote
 
 # Start both API server and Vite dev server
 dev:
@@ -29,3 +29,7 @@ scan:
 install:
 	uv sync
 	cd web && npm install
+
+# Check remote server readiness (TA-Lib, Node, uv, cloudflared, disk, etc.)
+check-remote:
+	@bash scripts/check-remote.sh

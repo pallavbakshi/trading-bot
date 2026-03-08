@@ -1096,8 +1096,8 @@ def main():
                    help="Test every Nth trading day (default: every day)")
     p.add_argument("--lookback", default="6M",
                    choices=["3M", "6M", "9M", "1Y", "2Y"])
-    p.add_argument("--model", default=MODELS[1],
-                   help=f"Model (default: {MODELS[1]})")
+    p.add_argument("--model", default=MODELS[0],
+                   help=f"Model (default: {MODELS[0]})")
     p.add_argument("--output", default="results/backtest",
                    help="Output root directory")
     p.add_argument("--capital", type=float, default=100000,

@@ -23,9 +23,8 @@ log = logging.getLogger("openrouter")
 API_URL = "https://openrouter.ai/api/v1/chat/completions"
 
 MODELS = [
-    "google/gemini-3.1-flash-lite-preview",
-    "google/gemini-3.1-pro-preview",
-    "anthropic/claude-sonnet-4.6",
+    "anthropic/claude-sonnet-4.6",          # [0] default — vision + analysis
+    "google/gemini-3.1-flash-lite-preview",  # [1] fast/cheap — JSON extraction
     "openai/gpt-5.4",
     "z-ai/glm-5",
     "minimax/minimax-m2.5",

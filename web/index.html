@@ -35,6 +35,8 @@
       </div>
       <input type="date" id="goto-date" title="Go to date" class="bg-btn-bg border border-btn-border text-accent font-mono text-sm font-semibold px-2 py-0.5 rounded cursor-pointer hover:border-accent shrink-0" />
       <div class="shrink-0 flex gap-1.5">
+        <button id="sim-btn" title="Simulate a trade from the current date"
+          class="bg-btn-bg border border-btn-border text-text font-mono text-base px-2 py-1 rounded cursor-pointer hover:border-accent">&#128202; Trade Sim</button>
         <button id="keylevels-btn" title="Analyse S/R levels with LLM (cached per view)"
           class="bg-btn-bg border border-btn-border text-text font-mono text-base px-2 py-1 rounded cursor-pointer hover:border-accent">&#128205; Key Levels</button>
         <button id="snapshot-btn" title="Save PNG + CSV snapshot"
@@ -150,8 +152,107 @@
       <span>Signals</span>
     </div>
     <div id="layer-panel" class="bg-bg-panel border border-border border-t-0 rounded-b-md overflow-hidden text-sm grid grid-cols-2"></div>
+
+    <!-- Backtesting History -->
+    <div id="history-header"
+      class="mt-2 px-2.5 py-1.5 bg-bg border border-border border-b-0 rounded-t-md flex justify-between items-center text-xs font-semibold text-text-muted uppercase tracking-wide cursor-pointer select-none">
+      <span>Backtesting History</span>
+      <div class="flex items-center gap-2">
+        <button id="history-clear-btn"
+          class="font-normal normal-case tracking-normal text-xs text-text-muted hover:text-red-500"
+          title="Clear history for this ticker">Clear</button>
+        <span id="history-chevron">▲</span>
+      </div>
+    </div>
+    <div id="history-panel" class="bg-bg-panel border border-border border-t-0 rounded-b-md text-xs">
+      <div id="history-empty" class="px-3 py-3 text-text-muted text-center">No trades recorded for this ticker.</div>
+      <div id="history-list"></div>
+    </div>
   </div>
 
   <script type="module" src="/src/main.ts"></script>
+
+<!-- Trade Simulator modal -->
+<div id="sim-modal" style="display:none" class="fixed inset-0 z-50 flex items-center justify-center">
+  <div id="sim-backdrop" class="absolute inset-0 bg-black/40"></div>
+  <div class="relative bg-bg border border-border rounded-lg shadow-xl p-5 w-[500px] max-h-[90vh] overflow-y-auto z-10 font-mono">
+    <div class="flex justify-between items-center mb-2">
+      <h2 class="font-semibold text-base">Trade Simulator</h2>
+      <button id="sim-close" class="text-text-muted hover:text-text text-xl leading-none px-1">&times;</button>
+    </div>
+    <div id="sim-ref" class="text-xs text-text-muted mb-4 pb-2 border-b border-border"></div>
+
+    <!-- Entry type -->
+    <div class="mb-3">
+      <div class="text-xs font-semibold text-text-muted uppercase tracking-wide mb-1.5">Entry</div>
+      <div class="flex gap-5 text-sm mb-2">
+        <label class="flex items-center gap-1.5 cursor-pointer">
+          <input type="radio" name="sim-entry-type" value="market" checked /> T+1 Open (market)
+        </label>
+        <label class="flex items-center gap-1.5 cursor-pointer">
+          <input type="radio" name="sim-entry-type" value="limit" /> Limit price
+        </label>
+      </div>
+      <div id="sim-limit-fields" style="display:none" class="flex gap-2">
+        <input type="number" id="sim-entry-price" placeholder="Entry price" step="0.01"
+          class="flex-1 bg-btn-bg border border-btn-border text-text font-mono text-sm px-2 py-1 rounded" />
+        <input type="number" id="sim-max-entry-days" placeholder="Max days to enter" min="1" step="1"
+          class="w-40 bg-btn-bg border border-btn-border text-text font-mono text-sm px-2 py-1 rounded" />
+      </div>
+    </div>
+
+    <!-- TP / SL -->
+    <div class="grid grid-cols-2 gap-2 mb-3">
+      <div>
+        <div class="text-xs text-text-muted mb-1">Take Profit <span class="text-text-dim">(optional)</span></div>
+        <input type="number" id="sim-tp" placeholder="TP price" step="0.01"
+          class="w-full bg-btn-bg border border-btn-border text-text font-mono text-sm px-2 py-1 rounded" />
+      </div>
+      <div>
+        <div class="text-xs text-text-muted mb-1">Stop Loss <span class="text-text-dim">(optional)</span></div>
+        <input type="number" id="sim-sl" placeholder="SL price" step="0.01"
+          class="w-full bg-btn-bg border border-btn-border text-text font-mono text-sm px-2 py-1 rounded" />
+      </div>
+    </div>
+
+    <!-- Max exit days -->
+    <div class="mb-3">
+      <div class="text-xs text-text-muted mb-1">Max days to hold from T+0 <span class="text-text-dim">(optional)</span></div>
+      <input type="number" id="sim-max-exit-days" placeholder="e.g. 10" min="1" step="1"
+        class="w-36 bg-btn-bg border border-btn-border text-text font-mono text-sm px-2 py-1 rounded" />
+    </div>
+
+    <!-- Direction (shown only when TP and SL are both empty) -->
+    <div id="sim-direction-row" class="mb-3 hidden">
+      <div class="text-xs font-semibold text-text-muted uppercase tracking-wide mb-1.5">Direction</div>
+      <div class="flex gap-5 text-sm">
+        <label class="flex items-center gap-1.5 cursor-pointer">
+          <input type="radio" name="sim-dir" value="long" /> Long ▲
+        </label>
+        <label class="flex items-center gap-1.5 cursor-pointer">
+          <input type="radio" name="sim-dir" value="short" /> Short ▼
+        </label>
+      </div>
+    </div>
+
+    <!-- Validation error -->
+    <div id="sim-error" class="hidden text-sm text-red-600 bg-red-50 border border-red-200 rounded px-3 py-2 mb-3"></div>
+
+    <button id="sim-run-btn"
+      class="w-full bg-accent text-white font-mono text-sm px-4 py-1.5 rounded cursor-pointer hover:opacity-90 mb-3">
+      Run Simulation
+    </button>
+
+    <!-- Results -->
+    <div id="sim-results" class="hidden border-t border-border pt-3">
+      <div class="text-xs font-semibold text-text-muted uppercase tracking-wide mb-2">Results</div>
+      <div id="sim-results-content" class="text-sm space-y-1.5 mb-3"></div>
+      <button id="sim-save-btn"
+        class="w-full bg-btn-bg border border-btn-border text-text font-mono text-xs px-3 py-1.5 rounded cursor-pointer hover:border-accent">
+        Save to History
+      </button>
+    </div>
+  </div>
+</div>
 </body>
 </html>

@@ -22,7 +22,7 @@ Usage:
   tb chats
   tb chatlog <chat_id>
   tb keylevels
-  tb keylevels --image snap.png --model google/gemini-3.1-pro-preview
+  tb keylevels --image snap.png --model anthropic/claude-sonnet-4.6
 """
 
 import argparse
@@ -129,13 +129,13 @@ def main():
 
     # toggle
     tg = sub.add_parser("toggle", help="Toggle chart overlays on/off")
-    tg.add_argument("key", choices=["trading-days", "vol-profile", "sma", "rsi", "avwap"],
+    tg.add_argument("key", choices=["trading-days", "vol-profile", "sma", "rsi", "avwap", "llm-levels"],
                      help="Feature to toggle")
     tg.add_argument("state", choices=["on", "off"], help="on or off")
 
     # layer
     ly = sub.add_parser("layer", help="Toggle signal layers on/off")
-    ly.add_argument("key", choices=["sr", "geometric", "crosses", "bb_squeeze", "vol_climax", "divergences", "gaps"],
+    ly.add_argument("key", choices=["sr", "geometric", "crosses", "bb_squeeze", "vol_climax", "divergences", "gaps", "llm_levels"],
                      help="Layer key")
     ly.add_argument("state", choices=["on", "off"], help="on or off")
 
@@ -196,7 +196,7 @@ def main():
     bt.add_argument("--lookback", default="6M",
                      choices=["3M", "6M", "9M", "1Y", "2Y"])
     bt.add_argument("--model", default=None,
-                     help="Model (default: google/gemini-3.1-pro-preview)")
+                     help="Model (default: anthropic/claude-sonnet-4.6)")
     bt.add_argument("--output", default="results/backtest",
                      help="Output root directory")
     bt.add_argument("--capital", type=float, default=100000,

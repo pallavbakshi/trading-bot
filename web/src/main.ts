@@ -40,13 +40,14 @@ let currentTicker = "";
 let isDark = false;
 
 const layers: Layer[] = [
-  { key: "sr",          label: "S/R",        active: DEFAULTS.layers.sr },
-  { key: "geometric",   label: "Geometric",  active: DEFAULTS.layers.geometric },
-  { key: "crosses",     label: "GC / DC",    active: DEFAULTS.layers.crosses },
-  { key: "bb_squeeze",  label: "BB Squeeze", active: DEFAULTS.layers.bb_squeeze },
-  { key: "vol_climax",  label: "Vol Climax", active: DEFAULTS.layers.vol_climax },
-  { key: "divergences", label: "Diverg.",    active: DEFAULTS.layers.divergences },
-  { key: "gaps",        label: "Gaps",       active: DEFAULTS.layers.gaps },
+  { key: "sr",             label: "S/R",            active: DEFAULTS.layers.sr },
+  { key: "geometric",      label: "Geometric",       active: DEFAULTS.layers.geometric },
+  { key: "crosses",        label: "GC / DC",         active: DEFAULTS.layers.crosses },
+  { key: "bb_squeeze",     label: "BB Squeeze",      active: DEFAULTS.layers.bb_squeeze },
+  { key: "vol_climax",     label: "Vol Climax",      active: DEFAULTS.layers.vol_climax },
+  { key: "divergences",    label: "Diverg.",         active: DEFAULTS.layers.divergences },
+  { key: "gaps",           label: "Gaps",            active: DEFAULTS.layers.gaps },
+  { key: "llm_levels",     label: "LLM Key Levels",  active: false },
 ];
 
 // ── Dimensions ─────────────────────────────────────────────────────────
@@ -72,8 +73,11 @@ let showVolProfile = DEFAULTS.showVolProfile;
 let showSMA = DEFAULTS.showSMA;
 let showRSI = DEFAULTS.showRSI;
 let showAVWAP = DEFAULTS.showAVWAP;
-let showLLMLevels = false;
 let llmLevels: { resistance: number[]; support: number[] } | null = null;
+let llmLevelsKey: string | null = null;      // key of currently loaded levels
+let _llmCheckedKey: string | null = null;    // last key we already queried (no cache found)
+let _llmPendingKey: string | null = null;    // key for which a cache-check has been armed
+let _llmCacheTimer: ReturnType<typeof setTimeout> | null = null;
 let timeframe = DEFAULTS.interval;
 let activeTfDays: number | null = null; // tracks lookback selection
 let activeLfDays: number | null = null; // tracks lookforward selection
@@ -225,6 +229,8 @@ async function init() {
 
   await loadTicker(tickers[0].ticker);
 
+  initSim();
+
   window.addEventListener("resize", () => {
     if (bars.length > 0) { setupSVG(); draw(); }
   });
@@ -330,6 +336,7 @@ async function loadTicker(ticker: string, force = false) {
   rsiValues = tf.rsi.map(v => v ?? NaN);
 
   renderLayerPanel();
+  renderHistoryPanel();
   precompute();
 
   visibleRange = [0, bars.length - 1];
@@ -368,45 +375,58 @@ async function loadTicker(ticker: string, force = false) {
 function switchTimeframe(tf: "daily" | "weekly" | "monthly") {
   if (tf === timeframe) return;
 
-  // Remember current NOW date
-  const currentDate = bars[sliderIndex]?.date ?? "";
-
-  timeframe = tf;
-  const data = tickerData![tf];
-  bars = data.bars;
-  result = data.result;
-  sma50 = data.sma50.map(v => v ?? NaN);
-  sma200 = data.sma200.map(v => v ?? NaN);
-  rsiValues = data.rsi.map(v => v ?? NaN);
-  precompute();
-
-  // Find closest bar to previous NOW date
-  let bestIdx = 0;
-  for (let i = 0; i < bars.length; i++) {
-    if (bars[i].date <= currentDate) bestIdx = i;
+  // Show spinner immediately, then yield so the browser paints it before the heavy redraw.
+  const chartContainer = document.getElementById("chart-container")!;
+  if (!document.getElementById("loading-overlay")) {
+    const overlay = document.createElement("div");
+    overlay.id = "loading-overlay";
+    overlay.innerHTML = `<div class="loading-spinner"></div>`;
+    chartContainer.appendChild(overlay);
   }
 
-  sliderIndex = bestIdx;
+  setTimeout(() => {
+    // Remember current NOW date
+    const currentDate = bars[sliderIndex]?.date ?? "";
 
-  // Update button active states
-  document.querySelectorAll(".interval-btn").forEach(btn => {
-    btn.classList.toggle("active", (btn as HTMLElement).dataset.interval === tf);
-  });
+    timeframe = tf;
+    const data = tickerData![tf];
+    bars = data.bars;
+    result = data.result;
+    sma50 = data.sma50.map(v => v ?? NaN);
+    sma200 = data.sma200.map(v => v ?? NaN);
+    rsiValues = data.rsi.map(v => v ?? NaN);
+    precompute();
 
-  // Re-apply active timeframe window, or reset to full zoom
-  if (activeTfDays !== null) {
-    showTimeframe(activeTfDays);
-  } else if (activeLfDays !== null) {
-    showLookforward(activeLfDays);
-  } else {
-    visibleRange = [0, bars.length - 1];
-    const zoomSlider = document.getElementById("zoom-slider") as HTMLInputElement;
-    zoomSlider.value = "0";
-    document.getElementById("zoom-label")!.textContent = "100%";
-    (document.getElementById("nav-slider") as HTMLInputElement).value = "1000";
-    draw();
-  }
-  positionNowHandle();
+    // Find closest bar to previous NOW date
+    let bestIdx = 0;
+    for (let i = 0; i < bars.length; i++) {
+      if (bars[i].date <= currentDate) bestIdx = i;
+    }
+
+    sliderIndex = bestIdx;
+
+    // Update button active states
+    document.querySelectorAll(".interval-btn").forEach(btn => {
+      btn.classList.toggle("active", (btn as HTMLElement).dataset.interval === tf);
+    });
+
+    // Re-apply active timeframe window, or reset to full zoom
+    if (activeTfDays !== null) {
+      showTimeframe(activeTfDays);
+    } else if (activeLfDays !== null) {
+      showLookforward(activeLfDays);
+    } else {
+      visibleRange = [0, bars.length - 1];
+      const zoomSlider = document.getElementById("zoom-slider") as HTMLInputElement;
+      zoomSlider.value = "0";
+      document.getElementById("zoom-label")!.textContent = "100%";
+      (document.getElementById("nav-slider") as HTMLInputElement).value = "1000";
+      draw();
+    }
+    positionNowHandle();
+
+    document.getElementById("loading-overlay")?.remove();
+  }, 0);
 }
 
 function applyZoom() {
@@ -613,6 +633,13 @@ function buildPanelRows(): PanelRow[] {
     { icon: `<svg width="14" height="14"><rect x="2" y="4" width="10" height="6" fill="#3fb950" opacity="0.3" rx="1"/></svg>`,
       label: "Gaps", layerKey: "gaps",
       countFn: (d) => result?.gaps.filter(g => g.date <= d).length ?? 0 },
+  );
+
+  // ── LLM Key Levels ──
+  rows.push(
+    { icon: `<svg width="14" height="14"><line x1="0" y1="7" x2="14" y2="7" stroke="#ef4444" stroke-width="1.5" stroke-dasharray="4,2"/><line x1="0" y1="10" x2="14" y2="10" stroke="#22c55e" stroke-width="1.5" stroke-dasharray="4,2"/></svg>`,
+      label: "LLM Key Levels", layerKey: "llm_levels",
+      countFn: () => (llmLevels?.resistance.length ?? 0) + (llmLevels?.support.length ?? 0) },
   );
 
   return rows;
@@ -823,8 +850,58 @@ function setupSVG() {
 }
 
 // ── Draw ───────────────────────────────────────────────────────────────
+function currentLLMKey(): string {
+  const [v0, v1] = visibleRange;
+  return [currentTicker, bars[sliderIndex]?.date ?? "", bars[v0]?.date ?? "", bars[v1]?.date ?? "", timeframe].join("|");
+}
+
+function scheduleCheckLLMCache() {
+  if (_llmCacheTimer) clearTimeout(_llmCacheTimer);
+  _llmCacheTimer = setTimeout(async () => {
+    const key = currentLLMKey();
+    if (llmLevelsKey === key) return;   // already loaded
+    if (_llmCheckedKey === key) return; // already queried — no cache exists for this key
+    const [v0, v1] = visibleRange;
+    const params = new URLSearchParams({
+      ticker:    currentTicker,
+      date:      bars[sliderIndex]?.date ?? "",
+      vdr_start: bars[v0]?.date ?? "",
+      vdr_end:   bars[v1]?.date ?? "",
+      interval:  timeframe,
+    });
+    try {
+      const r = await fetch(`/api/keylevels/check?${params}`);
+      const data = await r.json();
+      if (data !== null && currentLLMKey() === key) {
+        // Cache auto-load: don't override the user's eye state
+        await executeCommand({ action: "key_levels", resistance: data.resistance, support: data.support, activate: false });
+      } else {
+        _llmCheckedKey = key;  // no cache — don't re-query until key changes
+      }
+    } catch (e) {
+      console.error("keylevels cache check failed:", e);
+    }
+  }, 400);
+}
+
 function draw() {
   if (bars.length === 0) return;
+
+  // Clear LLM levels if the chart state they were loaded for has changed,
+  // then schedule a cache lookup for the new state (once per unique key, not every draw).
+  const _curLLMKey = currentLLMKey();
+  if (llmLevelsKey !== _curLLMKey) {
+    if (llmLevels) {
+      llmLevels = null;
+      llmLevelsKey = null;
+      // Don't touch the eye state — drawLLMLevels() won't render when llmLevels is null,
+      // and we want to restore to the user's preferred state when cache reloads.
+    }
+    if (_llmPendingKey !== _curLLMKey) {
+      _llmPendingKey = _curLLMKey;
+      scheduleCheckLLMCache();
+    }
+  }
 
   const [vi0, vi1] = visibleRange;
   const visible = bars.slice(vi0, vi1 + 1);
@@ -1344,7 +1421,7 @@ function drawAVWAP(visible: Bar[], sliderDate: string) {
 // ── LLM Key Levels ─────────────────────────────────────────────────────
 function drawLLMLevels() {
   gLLMLevels.selectAll("*").remove();
-  if (!showLLMLevels || !llmLevels || !yPrice) return;
+  if (!llmLevels || !yPrice) return;
 
   const chartW = W - margin.left - margin.right;
 
@@ -1362,8 +1439,10 @@ function drawLLMLevels() {
       .text(price.toFixed(2));
   };
 
-  (llmLevels.resistance || []).forEach(p => drawLevel(p, "#ef4444"));
-  (llmLevels.support    || []).forEach(p => drawLevel(p, "#22c55e"));
+  if (isLayerActive("llm_levels")) {
+    (llmLevels.resistance || []).forEach(p => drawLevel(p, "#ef4444"));
+    (llmLevels.support    || []).forEach(p => drawLevel(p, "#22c55e"));
+  }
 }
 
 // ── RSI Panel ──────────────────────────────────────────────────────────
@@ -2117,9 +2196,9 @@ async function executeCommand(cmd: { action: string; [key: string]: unknown }) {
         showAVWAP = on;
         (document.getElementById("avwap-toggle") as HTMLInputElement).checked = on;
       } else if (key === "llm-levels") {
-        showLLMLevels = on;
-        const klBtn = document.getElementById("keylevels-btn") as HTMLButtonElement;
-        if (klBtn) klBtn.style.opacity = on ? "1" : "0.5";
+        const ll = layers.find(l => l.key === "llm_levels");
+        if (ll) ll.active = on;
+        renderLayerPanel();
       }
       draw();
       break;
@@ -2130,9 +2209,11 @@ async function executeCommand(cmd: { action: string; [key: string]: unknown }) {
         resistance: Array.isArray(cmd.resistance) ? cmd.resistance.map(Number) : [],
         support: Array.isArray(cmd.support) ? cmd.support.map(Number) : [],
       };
-      if (!showLLMLevels) {
-        showLLMLevels = true;
-        (document.getElementById("llm-levels-toggle") as HTMLInputElement).checked = true;
+      llmLevelsKey = currentLLMKey();
+      _llmCheckedKey = null;
+      // activate=false means cache auto-load — preserve user's eye state
+      if (cmd.activate !== false) {
+        layers.find(l => l.key === "llm_levels")!.active = true;
       }
       draw();
       break;
@@ -2177,10 +2258,11 @@ async function executeCommand(cmd: { action: string; [key: string]: unknown }) {
       (document.getElementById("sma-toggle") as HTMLInputElement).checked = false;
       (document.getElementById("rsi-toggle") as HTMLInputElement).checked = false;
       (document.getElementById("avwap-toggle") as HTMLInputElement).checked = false;
-      showLLMLevels = false;
       llmLevels = null;
-      const klBtn = document.getElementById("keylevels-btn") as HTMLButtonElement;
-      if (klBtn) { klBtn.textContent = "📍 Key Levels"; klBtn.style.opacity = "1"; }
+      llmLevelsKey = null;
+      _llmCheckedKey = null;
+      _llmPendingKey = null;
+      layers.find(l => l.key === "llm_levels")!.active = false;
       // Reload ticker data fresh (force=true bypasses same-ticker guard)
       await loadTicker(ticker, true);
       break;
@@ -2570,14 +2652,6 @@ document.getElementById("snapshot-btn")!.addEventListener("click", () => takeSna
 async function requestKeyLevels() {
   const btn = document.getElementById("keylevels-btn") as HTMLButtonElement;
 
-  // If levels already loaded, just toggle visibility
-  if (llmLevels) {
-    showLLMLevels = !showLLMLevels;
-    btn.style.opacity = showLLMLevels ? "1" : "0.5";
-    draw();
-    return;
-  }
-
   const sliderDate = bars[sliderIndex]?.date ?? "";
   const [v0, v1] = visibleRange;
   const vdrStart = bars[v0]?.date ?? "";
@@ -2585,6 +2659,7 @@ async function requestKeyLevels() {
 
   btn.disabled = true;
   btn.textContent = "Analysing…";
+  _llmCheckedKey = null;  // force fresh poll even if we already checked this key
 
   try {
     const { default: html2canvas } = await import("html2canvas");
@@ -2606,6 +2681,7 @@ async function requestKeyLevels() {
         trading_days: dateMode === "trading",
         t_lookback: sliderIndex - v0,
         t_lookforward: v1 - sliderIndex,
+        force: true,  // always re-run LLM, overwrite cache
       }),
     });
     const init = await resp.json();
@@ -2635,6 +2711,385 @@ async function requestKeyLevels() {
 }
 
 document.getElementById("keylevels-btn")!.addEventListener("click", requestKeyLevels);
+
+// ── Trade Simulator ──────────────────────────────────────────────────────
+interface SimParams {
+  ticker: string;
+  simDate: string;
+  simBarIdx: number;
+  interval: "daily" | "weekly" | "monthly";
+  entryType: "market" | "limit";
+  entryPrice?: number;
+  maxDaysToEnter?: number;
+  tp?: number;
+  sl?: number;
+  direction: "long" | "short";
+  maxExitDays?: number;
+}
+
+interface SimResult {
+  params: SimParams;
+  runAt: string;
+  entryTriggered: boolean;
+  entryDate?: string;
+  actualEntryPrice?: number;
+  entryBarIdx?: number;
+  exited: boolean;
+  exitDate?: string;
+  exitPrice?: number;
+  exitReason?: "tp" | "sl" | "sl_tp_same_bar" | "max_days" | "end_of_data";
+  pnlPct?: number;
+  pnlAbs?: number;
+  durationBars?: number;
+  warnings: string[];
+}
+
+let _lastSimResult: SimResult | null = null;
+
+function runSimulation(p: SimParams): SimResult {
+  const res: SimResult = {
+    params: p, runAt: new Date().toISOString(),
+    entryTriggered: false, exited: false, warnings: [],
+  };
+
+  // ── Find entry ──
+  let entryBarIdx = -1;
+  let actualEntryPrice = 0;
+
+  if (p.entryType === "market") {
+    const i = p.simBarIdx + 1;
+    if (i >= bars.length) {
+      res.warnings.push("No bar after T+0 — end of available data.");
+      return res;
+    }
+    entryBarIdx = i;
+    actualEntryPrice = bars[i].open;
+  } else {
+    // Limit: search T+0 through T+0+(maxDaysToEnter-1) inclusive
+    const end = Math.min(bars.length - 1, p.simBarIdx + (p.maxDaysToEnter! - 1));
+    for (let i = p.simBarIdx; i <= end; i++) {
+      const b = bars[i];
+      if (p.direction === "long" && b.low <= p.entryPrice!) {
+        entryBarIdx = i; actualEntryPrice = p.entryPrice!; break;
+      }
+      if (p.direction === "short" && b.high >= p.entryPrice!) {
+        entryBarIdx = i; actualEntryPrice = p.entryPrice!; break;
+      }
+    }
+    if (entryBarIdx === -1) return res; // entry never triggered
+  }
+
+  res.entryTriggered = true;
+  res.entryBarIdx = entryBarIdx;
+  res.actualEntryPrice = actualEntryPrice;
+  res.entryDate = bars[entryBarIdx].date;
+
+  // ── Simulate forward ──
+  const exitDeadline = p.maxExitDays !== undefined
+    ? Math.min(bars.length - 1, p.simBarIdx + p.maxExitDays)
+    : bars.length - 1;
+
+  for (let i = entryBarIdx + 1; i <= exitDeadline; i++) {
+    const b = bars[i];
+    let tpHit = false, slHit = false;
+    if (p.direction === "long") {
+      if (p.sl !== undefined && b.low  <= p.sl) slHit = true;
+      if (p.tp !== undefined && b.high >= p.tp) tpHit = true;
+    } else {
+      if (p.sl !== undefined && b.high >= p.sl) slHit = true;
+      if (p.tp !== undefined && b.low  <= p.tp) tpHit = true;
+    }
+
+    if (slHit && tpHit) {
+      res.exited = true; (res as any).exitBarIdx = i; res.exitDate = b.date;
+      res.exitPrice = p.sl!; res.exitReason = "sl_tp_same_bar";
+      res.warnings.push("Both SL and TP within this bar's range — assumed SL filled (worst case).");
+      break;
+    } else if (slHit) {
+      res.exited = true; (res as any).exitBarIdx = i; res.exitDate = b.date;
+      res.exitPrice = p.sl!; res.exitReason = "sl"; break;
+    } else if (tpHit) {
+      res.exited = true; (res as any).exitBarIdx = i; res.exitDate = b.date;
+      res.exitPrice = p.tp!; res.exitReason = "tp"; break;
+    }
+
+    // Last bar in window
+    if (i === exitDeadline) {
+      res.exited = true; (res as any).exitBarIdx = i; res.exitDate = b.date;
+      res.exitPrice = b.close;
+      res.exitReason = i === bars.length - 1 ? "end_of_data" : "max_days";
+      if (res.exitReason === "end_of_data")
+        res.warnings.push("Position held to end of available data.");
+    }
+  }
+
+  if (!res.exited && entryBarIdx === bars.length - 1)
+    res.warnings.push("Entered on last bar — no forward bars to simulate.");
+
+  // ── P&L ──
+  if (res.exited && res.exitPrice !== undefined) {
+    const diff = p.direction === "long"
+      ? res.exitPrice - actualEntryPrice
+      : actualEntryPrice - res.exitPrice;
+    res.pnlAbs = diff;
+    res.pnlPct = (diff / actualEntryPrice) * 100;
+    res.durationBars = (res as any).exitBarIdx - entryBarIdx;
+  }
+
+  return res;
+}
+
+function validateAndBuildParams(): { error?: string; params?: SimParams } {
+  const entryType = (document.querySelector('input[name="sim-entry-type"]:checked') as HTMLInputElement).value as "market" | "limit";
+  const entryPriceVal   = (document.getElementById("sim-entry-price")    as HTMLInputElement).value;
+  const maxEntryDaysVal = (document.getElementById("sim-max-entry-days") as HTMLInputElement).value;
+  const tpVal           = (document.getElementById("sim-tp")             as HTMLInputElement).value;
+  const slVal           = (document.getElementById("sim-sl")             as HTMLInputElement).value;
+  const maxExitDaysVal  = (document.getElementById("sim-max-exit-days")  as HTMLInputElement).value;
+
+  const entryPrice    = entryPriceVal   ? parseFloat(entryPriceVal)   : undefined;
+  const maxDaysToEnter = maxEntryDaysVal ? parseInt(maxEntryDaysVal)   : undefined;
+  const tp            = tpVal           ? parseFloat(tpVal)           : undefined;
+  const sl            = slVal           ? parseFloat(slVal)           : undefined;
+  const maxExitDays   = maxExitDaysVal  ? parseInt(maxExitDaysVal)    : undefined;
+
+  if (entryType === "limit") {
+    if (!entryPrice || isNaN(entryPrice) || entryPrice <= 0)
+      return { error: "Please enter a valid entry price." };
+    if (!maxDaysToEnter || isNaN(maxDaysToEnter) || maxDaysToEnter < 1)
+      return { error: "Please set max days to enter (minimum 1)." };
+  }
+  if (maxExitDays !== undefined && (isNaN(maxExitDays) || maxExitDays < 1))
+    return { error: "Max days to hold must be at least 1." };
+
+  const refPrice = entryType === "limit" ? entryPrice! : bars[sliderIndex].close;
+
+  // Auto-detect direction
+  let direction: "long" | "short" | null = null;
+  if (tp !== undefined && sl !== undefined) {
+    if      (tp > refPrice && sl < refPrice) direction = "long";
+    else if (tp < refPrice && sl > refPrice) direction = "short";
+    else return { error: "TP and SL don't define a clear direction — check your values." };
+  } else if (tp !== undefined) {
+    direction = tp > refPrice ? "long" : "short";
+  } else if (sl !== undefined) {
+    direction = sl < refPrice ? "long" : "short";
+  } else {
+    const dirEl = document.querySelector('input[name="sim-dir"]:checked') as HTMLInputElement | null;
+    if (!dirEl) return { error: "Please set TP / SL, or select a direction (Long / Short)." };
+    direction = dirEl.value as "long" | "short";
+  }
+
+  // Cross-validate TP/SL vs detected direction
+  if (tp !== undefined) {
+    if (direction === "long"  && tp <= refPrice) return { error: "Long trade: Take Profit must be above entry price." };
+    if (direction === "short" && tp >= refPrice) return { error: "Short trade: Take Profit must be below entry price." };
+  }
+  if (sl !== undefined) {
+    if (direction === "long"  && sl >= refPrice) return { error: "Long trade: Stop Loss must be below entry price." };
+    if (direction === "short" && sl <= refPrice) return { error: "Short trade: Stop Loss must be above entry price." };
+  }
+
+  return {
+    params: {
+      ticker: currentTicker, simDate: bars[sliderIndex].date,
+      simBarIdx: sliderIndex, interval: timeframe,
+      entryType, entryPrice, maxDaysToEnter,
+      tp, sl, direction, maxExitDays,
+    },
+  };
+}
+
+function renderSimResults(r: SimResult) {
+  const el = document.getElementById("sim-results-content")!;
+  const p = r.params;
+  const dirClass = p.direction === "long" ? "color:#1a7f37" : "color:#cf222e";
+  const dirLabel = p.direction === "long" ? "LONG ▲" : "SHORT ▼";
+  const lines: string[] = [];
+
+  lines.push(`<div class="font-semibold mb-2"><span style="${dirClass}">${dirLabel}</span> &nbsp;${p.ticker} &middot; ${p.simDate} &middot; ${p.interval}</div>`);
+
+  if (!r.entryTriggered) {
+    const window = p.entryType === "limit"
+      ? `within ${p.maxDaysToEnter} day(s) from T+0`
+      : "no bar after T+0";
+    lines.push(`<div style="color:#cf222e;font-weight:600">Entry not triggered (${window})</div>`);
+  } else {
+    const entryLabel = p.entryType === "market" ? "T+1 Open" : "Limit";
+    lines.push(`<div>&#128229; <span class="text-text-muted">Entry</span> &nbsp;${r.entryDate} @ <strong>${r.actualEntryPrice?.toFixed(2)}</strong> <span class="text-text-dim text-xs">(${entryLabel})</span></div>`);
+
+    if (!r.exited) {
+      lines.push(`<div class="text-text-muted italic">No exit triggered.</div>`);
+    } else {
+      const exitIcon: Record<string, string> = {
+        tp: "&#9989;", sl: "&#10060;", sl_tp_same_bar: "&#9888;&#65039;", max_days: "&#9203;", end_of_data: "&#128202;",
+      };
+      const exitName: Record<string, string> = {
+        tp: "Take Profit", sl: "Stop Loss", sl_tp_same_bar: "SL (same-bar conflict)",
+        max_days: "Max days reached", end_of_data: "End of data",
+      };
+      const exitColor = r.exitReason === "tp" ? "#1a7f37" : r.exitReason === "sl" || r.exitReason === "sl_tp_same_bar" ? "#cf222e" : "#656d76";
+      lines.push(`<div>&#128228; <span class="text-text-muted">Exit</span> &nbsp;${r.exitDate} @ <strong>${r.exitPrice?.toFixed(2)}</strong> &nbsp;<span style="color:${exitColor};font-size:0.75rem">${exitIcon[r.exitReason!]} ${exitName[r.exitReason!]}</span></div>`);
+
+      const pnlPos = (r.pnlPct ?? 0) >= 0;
+      const pnlColor = pnlPos ? "#1a7f37" : "#cf222e";
+      const pnlSign = pnlPos ? "+" : "";
+      lines.push(`<div style="color:${pnlColor};font-weight:600;margin-top:4px">P&amp;L: ${pnlSign}${r.pnlPct?.toFixed(2)}%&ensp;(${pnlSign}${r.pnlAbs?.toFixed(2)})</div>`);
+      lines.push(`<div class="text-text-muted text-xs">Duration: ${r.durationBars} bar${r.durationBars !== 1 ? "s" : ""}</div>`);
+    }
+
+    for (const w of r.warnings)
+      lines.push(`<div style="color:#b45309;font-size:0.75rem;margin-top:4px">&#9888; ${w}</div>`);
+  }
+
+  el.innerHTML = lines.join("");
+  document.getElementById("sim-results")!.classList.remove("hidden");
+}
+
+// ── History storage ───────────────────────────────────────────────────────
+function _historyKey(ticker: string) { return `tradeHistory_${ticker}`; }
+
+function loadTradeHistory(ticker: string): { result: SimResult; id: string }[] {
+  try { return JSON.parse(localStorage.getItem(_historyKey(ticker)) ?? "[]"); }
+  catch { return []; }
+}
+
+function addToHistory(r: SimResult) {
+  const records = loadTradeHistory(r.params.ticker);
+  records.push({ result: r, id: String(Date.now()) });
+  localStorage.setItem(_historyKey(r.params.ticker), JSON.stringify(records.slice(-50)));
+}
+
+function renderHistoryPanel() {
+  const list  = document.getElementById("history-list")!;
+  const empty = document.getElementById("history-empty")!;
+  const records = loadTradeHistory(currentTicker);
+
+  if (records.length === 0) {
+    list.innerHTML = ""; empty.classList.remove("hidden"); return;
+  }
+  empty.classList.add("hidden");
+
+  const exitShort: Record<string, string> = {
+    tp: "TP", sl: "SL", sl_tp_same_bar: "SL*", max_days: "MaxDays", end_of_data: "EndData",
+  };
+
+  list.innerHTML = records.slice().reverse().map(({ result: r }) => {
+    const p = r.params;
+    const dirColor = p.direction === "long" ? "#1a7f37" : "#cf222e";
+    const dirLabel = p.direction === "long" ? "LONG" : "SHORT";
+
+    const pnlHtml = r.pnlPct !== undefined
+      ? `<span style="color:${r.pnlPct >= 0 ? "#1a7f37" : "#cf222e"};font-weight:600">${r.pnlPct >= 0 ? "+" : ""}${r.pnlPct.toFixed(2)}%</span>`
+      : `<span class="text-text-muted">–</span>`;
+
+    const entryHtml = r.entryTriggered
+      ? `${r.entryDate} @ ${r.actualEntryPrice?.toFixed(2)}`
+      : `<span style="color:#cf222e">Not triggered</span>`;
+
+    const exitHtml = r.exited
+      ? `${r.exitDate} @ ${r.exitPrice?.toFixed(2)} [${exitShort[r.exitReason!] ?? r.exitReason}]`
+      : "–";
+
+    const runDate = new Date(r.runAt).toLocaleDateString();
+
+    return `<div>
+      <div class="flex items-center gap-3 flex-wrap">
+        <span class="text-text-dim">${runDate}</span>
+        <span style="color:${dirColor};font-weight:600;width:2.5rem">${dirLabel}</span>
+        <span class="text-text-muted">${p.interval}</span>
+        <span>T+0: ${p.simDate}</span>
+        <span>${pnlHtml}</span>
+      </div>
+      <div class="text-text-muted mt-0.5">Entry: ${entryHtml} &nbsp;|&nbsp; Exit: ${exitHtml}</div>
+    </div>`;
+  }).join("");
+}
+
+function _simUpdateDirectionVisibility() {
+  const hasTp = !!(document.getElementById("sim-tp") as HTMLInputElement).value;
+  const hasSl = !!(document.getElementById("sim-sl") as HTMLInputElement).value;
+  document.getElementById("sim-direction-row")!.classList.toggle("hidden", hasTp || hasSl);
+}
+
+function openSimModal() {
+  // Reset form
+  (document.querySelector('input[name="sim-entry-type"][value="market"]') as HTMLInputElement).checked = true;
+  document.getElementById("sim-limit-fields")!.style.display = "none";
+  (["sim-entry-price", "sim-max-entry-days", "sim-tp", "sim-sl", "sim-max-exit-days"] as const)
+    .forEach(id => { (document.getElementById(id) as HTMLInputElement).value = ""; });
+  document.getElementById("sim-direction-row")!.classList.add("hidden");
+  document.getElementById("sim-error")!.classList.add("hidden");
+  document.getElementById("sim-results")!.classList.add("hidden");
+  _lastSimResult = null;
+
+  // Show current bar reference
+  const b = bars[sliderIndex];
+  document.getElementById("sim-ref")!.textContent =
+    `T+0: ${b.date}  ·  Close ${b.close.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}  ·  ${timeframe}`;
+
+  document.getElementById("sim-modal")!.style.display = "flex";
+}
+
+function initSim() {
+  const modal = document.getElementById("sim-modal")!;
+  const close = () => { modal.style.display = "none"; };
+
+  document.getElementById("sim-btn")!.addEventListener("click", openSimModal);
+  document.getElementById("sim-close")!.addEventListener("click", close);
+  document.getElementById("sim-backdrop")!.addEventListener("click", close);
+
+  // Entry type toggle → show/hide limit fields
+  document.querySelectorAll('input[name="sim-entry-type"]').forEach(r => {
+    r.addEventListener("change", () => {
+      document.getElementById("sim-limit-fields")!.style.display =
+        (r as HTMLInputElement).value === "limit" ? "flex" : "none";
+    });
+  });
+
+  // Auto-show direction row when both TP and SL are empty
+  document.getElementById("sim-tp")!.addEventListener("input", _simUpdateDirectionVisibility);
+  document.getElementById("sim-sl")!.addEventListener("input", _simUpdateDirectionVisibility);
+
+  // Run
+  document.getElementById("sim-run-btn")!.addEventListener("click", () => {
+    const errEl = document.getElementById("sim-error")!;
+    const { error, params } = validateAndBuildParams();
+    if (error) { errEl.textContent = error; errEl.classList.remove("hidden"); return; }
+    errEl.classList.add("hidden");
+    _lastSimResult = runSimulation(params!);
+    renderSimResults(_lastSimResult);
+  });
+
+  // Save to history
+  document.getElementById("sim-save-btn")!.addEventListener("click", () => {
+    if (!_lastSimResult) return;
+    addToHistory(_lastSimResult);
+    renderHistoryPanel();
+    close();
+  });
+
+  // History panel toggle (collapse/expand)
+  document.getElementById("history-header")!.addEventListener("click", (e) => {
+    if ((e.target as HTMLElement).id === "history-clear-btn") return;
+    const panel   = document.getElementById("history-panel")!;
+    const chevron = document.getElementById("history-chevron")!;
+    const hiding  = !panel.classList.contains("hidden");
+    panel.classList.toggle("hidden", hiding);
+    chevron.textContent = hiding ? "▼" : "▲";
+  });
+
+  // Clear history
+  document.getElementById("history-clear-btn")!.addEventListener("click", (e) => {
+    e.stopPropagation();
+    if (confirm(`Clear backtesting history for ${currentTicker}?`)) {
+      localStorage.removeItem(_historyKey(currentTicker));
+      renderHistoryPanel();
+    }
+  });
+
+  renderHistoryPanel();
+}
 
 // ── Start ──────────────────────────────────────────────────────────────
 init();

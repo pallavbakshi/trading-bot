@@ -107,7 +107,7 @@ export interface TickerData {
   monthly: TimeframeData;
 }
 
-export type LayerKey = "sr" | "geometric" | "crosses" | "bb_squeeze" | "vol_climax" | "divergences" | "gaps";
+export type LayerKey = "sr" | "geometric" | "crosses" | "bb_squeeze" | "vol_climax" | "divergences" | "gaps" | "llm_levels";
 
 export interface Layer {
   key: LayerKey;

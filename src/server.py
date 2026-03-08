@@ -217,7 +217,10 @@ class Handler(BaseHTTPRequestHandler):
     results_map: dict = {}
 
     def do_GET(self):
-        path = self.path.rstrip("/")
+        from urllib.parse import urlparse, parse_qs
+        _parsed = urlparse(self.path)
+        path = _parsed.path.rstrip("/")
+        _qs   = parse_qs(_parsed.query)
 
         if path == "/api/tickers":
             tickers = _list_tickers(self.data_dirs)
@@ -283,6 +286,19 @@ class Handler(BaseHTTPRequestHandler):
                     _keylevels_result = None
             self._json(result)
 
+        elif path == "/api/keylevels/check":
+            ticker    = _qs.get("ticker",    ["UNKNOWN"])[0].upper()
+            date      = _qs.get("date",      ["unknown"])[0]
+            vdr_start = _qs.get("vdr_start", [""])[0]
+            vdr_end   = _qs.get("vdr_end",   [""])[0]
+            interval  = _qs.get("interval",  ["daily"])[0]
+            safe_key  = f"{ticker}_{date}_{vdr_start}_{vdr_end}_{interval}"
+            cache_path = Path(".cache/keylevels") / f"{safe_key}.json"
+            if cache_path.exists():
+                self._json(json.loads(cache_path.read_text()))
+            else:
+                self._json(None)
+
         else:
             self.send_error(404)
 
@@ -328,11 +344,13 @@ class Handler(BaseHTTPRequestHandler):
             t_lookforward = int(data.get("t_lookforward", 0))
             model         = data.get("model", None)
 
-            # Cache check — all four dimensions must match
+            force      = bool(data.get("force", False))
+
+            # Cache check — all four dimensions must match (skipped when force=True)
             safe_key   = f"{ticker}_{date}_{vdr_start}_{vdr_end}_{interval}"
             cache_path = Path(".cache/keylevels") / f"{safe_key}.json"
 
-            if cache_path.exists():
+            if not force and cache_path.exists():
                 cached = json.loads(cache_path.read_text())
                 with _kl_lock:
                     _keylevels_result = {"ok": True, "cached": True, **cached}
@@ -368,29 +386,34 @@ class Handler(BaseHTTPRequestHandler):
                         tmp_png = f.name
 
                     from src.openrouter import Chat, MODELS
-                    use_model = model or MODELS[1]   # default: gemini-pro (vision)
+                    use_model = model or MODELS[0]   # claude-sonnet-4.6 for vision
                     chat = Chat(model=use_model)
 
-                    # Turn 1 — free-form identification
+                    # Turn 1 — identify key levels
                     chat.send(
                         text=(
                             f"This chart shows {candle_label} candles. Current bar is at {date_desc}. "
-                            "Identify ALL major resistance and support levels clearly visible in the chart. "
-                            "Consider: swing highs/lows, consolidation zones, volume shelves, "
-                            "and price levels that have been tested multiple times. "
-                            "List each level with its specific price value."
+                            "Identify 3–5 key price levels that are most relevant to where price is RIGHT NOW (the current bar). "
+                            "Prioritise levels that are close to the current price — "
+                            "the nearest floor below and ceiling above current price are most important. "
+                            "Only include a historically distant level if it is so significant "
+                            "that price is likely to react to it in the near term. "
+                            "A level qualifies if price has visibly reacted to it at least twice, "
+                            "or it is a clear structural high/low/consolidation zone near the current bar. "
+                            "Do not label them as support or resistance. State each as a single price."
                         ),
                         image_path=tmp_png,
                         attachment_text=csv_text if csv_text else None,
                     )
 
-                    # Turn 2 — JSON extraction
+                    # Turn 2 — JSON extraction (flash-lite: fast + cheap)
                     reply2 = chat.send(
                         text=(
-                            "Now output ONLY a JSON object with the key levels you identified:\n"
-                            "{\"resistance\": [price1, price2, ...], \"support\": [price1, price2, ...]}\n"
-                            "Use exact numeric prices. No text, no markdown, just the JSON."
+                            "Output ONLY a JSON array of the key price levels you identified, "
+                            "sorted from highest to lowest. No keys, no labels, just the array.\n"
+                            "Example: [25400.00, 24800.50, 23150.00]"
                         ),
+                        model=MODELS[1],  # flash-lite for structured extraction
                     )
 
                     raw = reply2.strip()
@@ -398,9 +421,22 @@ class Handler(BaseHTTPRequestHandler):
                         raw = raw.split("```")[1]
                         if raw.startswith("json"):
                             raw = raw[4:]
-                    levels = json.loads(raw.strip())
-                    resistance = sorted([float(x) for x in levels.get("resistance", [])], reverse=True)
-                    support    = sorted([float(x) for x in levels.get("support", [])],    reverse=True)
+                    parsed = json.loads(raw.strip())
+                    # Accept either a flat array or the old {resistance, support} shape
+                    if isinstance(parsed, list):
+                        all_levels = sorted([float(x) for x in parsed], reverse=True)
+                    else:
+                        all_levels = sorted(
+                            [float(x) for x in parsed.get("resistance", []) + parsed.get("support", [])],
+                            reverse=True,
+                        )
+                    # Split into above/below current close for drawing colours
+                    try:
+                        close_price = float(csv_text.split("\n")[1].split(",")[4]) if csv_text else 0
+                    except Exception:
+                        close_price = 0
+                    resistance = [l for l in all_levels if l >= close_price] if close_price else all_levels
+                    support    = [l for l in all_levels if l <  close_price] if close_price else []
 
                     # Save cache
                     cache_path.parent.mkdir(parents=True, exist_ok=True)
