@@ -656,7 +656,7 @@ def run_server(data_dirs: list[str] = None, results_paths: list[str] = None,
 
 
 if __name__ == "__main__":
-    data_dirs = ["data/nse", "data/sp"]
+    data_dirs = []
     results_paths = ["results/patterns.json"]
     static_dir = None
 
