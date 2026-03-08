@@ -1,4 +1,4 @@
-.PHONY: dev api web scan install check-remote
+.PHONY: dev api web scan install check-remote deploy
 
 # Start both API server and Vite dev server
 dev:
@@ -33,3 +33,7 @@ install:
 # Check remote server readiness (TA-Lib, Node, uv, cloudflared, disk, etc.)
 check-remote:
 	@bash scripts/check-remote.sh
+
+# Deploy to remote: push code, rsync data, rebuild, restart server + tunnel
+deploy:
+	@bash scripts/deploy.sh

@@ -172,6 +172,48 @@
 
   <script type="module" src="/src/main.ts"></script>
 
+  <!-- Password gate — change PASSWORD below to share with friends -->
+  <script>
+    (function () {
+      var PASSWORD = 'bilby';
+      var KEY = 'tb_auth';
+      if (localStorage.getItem(KEY) === '1') return;
+      var gate = document.createElement('div');
+      gate.id = 'auth-gate';
+      gate.style.cssText = 'position:fixed;inset:0;z-index:9999;background:#0d1117;display:flex;align-items:center;justify-content:center;font-family:monospace';
+      gate.innerHTML = [
+        '<div style="background:#161b22;border:1px solid #30363d;border-radius:8px;padding:32px 40px;width:320px;text-align:center">',
+          '<div style="font-size:1.1rem;font-weight:600;color:#e6edf3;margin-bottom:8px">Trading Viewer</div>',
+          '<div style="font-size:0.8rem;color:#8b949e;margin-bottom:24px">Enter password to continue</div>',
+          '<input id="auth-input" type="password" placeholder="Password" autocomplete="current-password"',
+            ' style="width:100%;box-sizing:border-box;background:#0d1117;border:1px solid #30363d;color:#e6edf3;',
+            'font-family:monospace;font-size:0.9rem;padding:8px 12px;border-radius:6px;margin-bottom:12px;outline:none">',
+          '<button id="auth-btn"',
+            ' style="width:100%;background:#238636;border:none;color:#fff;font-family:monospace;font-size:0.9rem;',
+            'padding:8px;border-radius:6px;cursor:pointer">Enter</button>',
+          '<div id="auth-err" style="color:#f85149;font-size:0.8rem;margin-top:10px;min-height:1em"></div>',
+        '</div>'
+      ].join('');
+      document.body.appendChild(gate);
+      function attempt() {
+        var val = document.getElementById('auth-input').value;
+        if (val === PASSWORD) {
+          localStorage.setItem(KEY, '1');
+          gate.remove();
+        } else {
+          document.getElementById('auth-err').textContent = 'Incorrect password';
+          document.getElementById('auth-input').value = '';
+          document.getElementById('auth-input').focus();
+        }
+      }
+      document.getElementById('auth-btn').addEventListener('click', attempt);
+      document.getElementById('auth-input').addEventListener('keydown', function (e) {
+        if (e.key === 'Enter') attempt();
+      });
+      setTimeout(function () { document.getElementById('auth-input').focus(); }, 50);
+    })();
+  </script>
+
 <!-- Trade Simulator modal -->
 <div id="sim-modal" style="display:none" class="fixed inset-0 z-50 flex items-center justify-center">
   <div id="sim-backdrop" class="absolute inset-0 bg-black/40"></div>

@@ -215,6 +215,7 @@ def _get_ticker_data(ticker: str, data_dirs: list[str], results_map: dict) -> bo
 class Handler(BaseHTTPRequestHandler):
     data_dirs: list[str] = []
     results_map: dict = {}
+    static_dir: Path | None = None
 
     def do_GET(self):
         from urllib.parse import urlparse, parse_qs
@@ -300,7 +301,29 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(None)
 
         else:
+            self._serve_static(path)
+
+    def _serve_static(self, path: str):
+        import mimetypes
+        static_dir = Handler.static_dir
+        if static_dir is None:
             self.send_error(404)
+            return
+        rel = path.lstrip("/") or "index.html"
+        file_path = static_dir / rel
+        # SPA fallback: unknown paths serve index.html
+        if not file_path.exists() or file_path.is_dir():
+            file_path = static_dir / "index.html"
+        if not file_path.exists():
+            self.send_error(404)
+            return
+        content = file_path.read_bytes()
+        mime, _ = mimetypes.guess_type(str(file_path))
+        self.send_response(200)
+        self.send_header("Content-Type", mime or "application/octet-stream")
+        self.send_header("Content-Length", str(len(content)))
+        self.end_headers()
+        self.wfile.write(content)
 
     def do_POST(self):
         path = self.path.rstrip("/")
@@ -521,7 +544,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def run_server(data_dirs: list[str] = None, results_paths: list[str] = None,
-               host: str = "127.0.0.1", port: int = 8000):
+               host: str = "127.0.0.1", port: int = 8000, static_dir: str | None = None):
     if data_dirs is None:
         data_dirs = ["data"]
     if results_paths is None:
@@ -539,6 +562,9 @@ def run_server(data_dirs: list[str] = None, results_paths: list[str] = None,
 
     Handler.data_dirs = data_dirs
     Handler.results_map = results_map
+    Handler.static_dir = Path(static_dir) if static_dir else None
+    if Handler.static_dir:
+        print(f"Serving frontend from {Handler.static_dir}")
 
     # Disk cache for pre-built ticker data
     global _disk_cache_dir
@@ -599,8 +625,9 @@ def run_server(data_dirs: list[str] = None, results_paths: list[str] = None,
 if __name__ == "__main__":
     data_dirs = ["data"]
     results_paths = ["results/patterns.json"]
+    static_dir = None
 
-    # Parse args: --data-dir <dir> --results <path>
+    # Parse args: --data-dir <dir> --results <path> --static-dir <dir> --port <n>
     args = sys.argv[1:]
     i = 0
     while i < len(args):
@@ -609,6 +636,9 @@ if __name__ == "__main__":
             i += 2
         elif args[i] == "--results":
             results_paths.append(args[i + 1])
+            i += 2
+        elif args[i] == "--static-dir":
+            static_dir = args[i + 1]
             i += 2
         elif args[i] == "--port":
             i += 2  # handled below
@@ -619,4 +649,4 @@ if __name__ == "__main__":
     if "--port" in args:
         port = int(args[args.index("--port") + 1])
 
-    run_server(data_dirs=data_dirs, results_paths=results_paths, port=port)
+    run_server(data_dirs=data_dirs, results_paths=results_paths, port=port, static_dir=static_dir)
