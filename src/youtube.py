@@ -9,8 +9,11 @@ Usage:
 """
 
 import re
+from pathlib import Path
 
 from youtube_transcript_api import YouTubeTranscriptApi
+
+_CACHE_DIR = Path(".cache/transcripts")
 
 
 def extract_video_id(url: str) -> str | None:
@@ -37,10 +40,17 @@ def fetch_transcript(url: str) -> dict:
     if not video_id:
         return {"error": f"Could not extract video ID from: {url}"}
 
+    # Check disk cache first
+    _CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    cache_path = _CACHE_DIR / f"{video_id}.txt"
+    if cache_path.exists():
+        print(f"  youtube: transcript cache hit for {video_id}")
+        return {"video_id": video_id, "text": cache_path.read_text()}
+
     api = YouTubeTranscriptApi()
     transcript = None
 
-    # Try English first, then fall back to any available language
+    # Try English first, then Hindi, then fall back to any available language
     try:
         transcript = api.fetch(video_id, languages=["en", "hi"])
     except Exception:
@@ -61,4 +71,5 @@ def fetch_transcript(url: str) -> dict:
         return {"error": "No transcripts available for this video"}
 
     text = " ".join(s.text.strip() for s in transcript.snippets if s.text.strip())
+    cache_path.write_text(text)
     return {"video_id": video_id, "text": text}
