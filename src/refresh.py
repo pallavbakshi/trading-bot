@@ -316,6 +316,12 @@ Examples:
         parser.print_help()
         sys.exit(1)
 
+    # Allow "make refresh TICKER=nse" or "make refresh TICKER=sp" as shorthand
+    if args.ticker and args.ticker.lower() in ("nse", "sp"):
+        args.exchange = args.ticker.lower()
+        args.ticker = None
+        args.all = True
+
     print("Checking tv bridge...")
     try:
         check_bridge()
