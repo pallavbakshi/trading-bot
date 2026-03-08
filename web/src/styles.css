@@ -443,7 +443,46 @@ input[type="range"]::-moz-range-thumb {
   cursor: pointer;
 }
 #chat-csv:hover { border-color: var(--color-accent); }
+#chat-yt:hover { border-color: var(--color-accent); }
+.chat-yt-bar {
+  display: flex;
+  gap: 6px;
+  padding: 6px 10px;
+  border-top: 1px solid var(--color-border);
+  align-items: center;
+}
+.chat-yt-bar input {
+  flex: 1;
+  background: var(--color-bg);
+  border: 1px solid var(--color-border);
+  color: var(--color-text);
+  font-size: 12px;
+  padding: 4px 8px;
+  border-radius: 4px;
+}
+.chat-yt-bar button {
+  background: none;
+  border: 1px solid var(--color-border);
+  color: var(--color-text);
+  font-size: 12px;
+  padding: 4px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.chat-yt-bar button:hover { border-color: var(--color-accent); }
 .chat-preview-csv {
+  display: inline-block;
+  font-size: 12px;
+  color: var(--color-text-muted);
+  background: var(--color-bg);
+  border: 1px solid var(--color-border);
+  border-radius: 4px;
+  padding: 4px 8px;
+  margin-left: 6px;
+  vertical-align: middle;
+}
+.chat-preview-yt {
   display: inline-block;
   font-size: 12px;
   color: var(--color-text-muted);

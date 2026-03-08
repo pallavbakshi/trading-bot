@@ -26,6 +26,7 @@ interface Message {
 let messages: Message[] = [];
 let pendingScreenshot: string | null = null;
 let pendingCsv: string | null = null;
+let pendingTranscript: { url: string; text: string } | null = null;
 let drawer: HTMLElement;
 let messagesEl: HTMLElement;
 let inputEl: HTMLTextAreaElement;
@@ -71,9 +72,15 @@ function createUI() {
     </div>
     <div id="chat-messages"></div>
     <div id="chat-preview"></div>
+    <div id="chat-yt-bar" style="display:none" class="chat-yt-bar">
+      <input id="chat-yt-input" type="url" placeholder="YouTube URL..." />
+      <button id="chat-yt-fetch">Fetch</button>
+      <button id="chat-yt-cancel">&times;</button>
+    </div>
     <div class="chat-input-bar">
       <button id="chat-screenshot" title="Attach chart screenshot">&#128247;</button>
       <button id="chat-csv" title="Attach visible bar data as CSV">&#128202;</button>
+      <button id="chat-yt" title="Attach YouTube transcript">&#127909;</button>
       <textarea id="chat-input" placeholder="Ask about the chart..." rows="2"></textarea>
       <button id="chat-send" title="Send">&#9654;</button>
     </div>
@@ -127,6 +134,33 @@ function createUI() {
     pendingCsv = csv;
     const lines = csv.split("\n").length - 1; // minus header
     updatePreview();
+  });
+
+  const ytBtn = drawer.querySelector("#chat-yt")! as HTMLButtonElement;
+  const ytBar = drawer.querySelector("#chat-yt-bar")! as HTMLElement;
+  const ytInput = drawer.querySelector("#chat-yt-input")! as HTMLInputElement;
+  const ytFetchBtn = drawer.querySelector("#chat-yt-fetch")! as HTMLButtonElement;
+  const ytCancelBtn = drawer.querySelector("#chat-yt-cancel")! as HTMLButtonElement;
+
+  ytBtn.addEventListener("click", () => {
+    ytBar.style.display = ytBar.style.display === "none" ? "flex" : "none";
+    if (ytBar.style.display === "flex") ytInput.focus();
+  });
+
+  ytFetchBtn.addEventListener("click", () => {
+    const url = ytInput.value.trim();
+    if (url) fetchTranscript(url);
+  });
+
+  ytCancelBtn.addEventListener("click", () => {
+    ytBar.style.display = "none";
+    ytInput.value = "";
+  });
+
+  ytInput.addEventListener("keydown", (e) => {
+    e.stopPropagation();
+    if (e.key === "Enter") { e.preventDefault(); ytFetchBtn.click(); }
+    if (e.key === "Escape") ytCancelBtn.click();
   });
 
   screenshotBtn.addEventListener("click", async () => {
@@ -186,6 +220,7 @@ function createUI() {
 function clearPreview() {
   pendingScreenshot = null;
   pendingCsv = null;
+  pendingTranscript = null;
   previewEl.style.display = "none";
   previewEl.innerHTML = "";
 }
@@ -199,12 +234,45 @@ function updatePreview() {
     const lines = pendingCsv.split("\n").length - 1;
     parts.push(`<span class="chat-preview-csv">\uD83D\uDCCA ${lines} bars</span>`);
   }
+  if (pendingTranscript) {
+    const chars = pendingTranscript.text.length;
+    parts.push(`<span class="chat-preview-yt">\uD83D\uDCFA ${pendingTranscript.url.replace(/.*v=/, "").slice(0, 11)} (${chars.toLocaleString()} chars)</span>`);
+  }
   if (parts.length) {
     previewEl.innerHTML = parts.join("") + `<button id="chat-remove-preview" title="Remove">&times;</button>`;
     previewEl.style.display = "block";
     previewEl.querySelector("#chat-remove-preview")!.addEventListener("click", clearPreview);
   } else {
     clearPreview();
+  }
+}
+
+async function fetchTranscript(url: string): Promise<void> {
+  const ytFetchBtn = drawer.querySelector("#chat-yt-fetch")! as HTMLButtonElement;
+  const ytCancelBtn = drawer.querySelector("#chat-yt-cancel")! as HTMLButtonElement;
+  const ytBar = drawer.querySelector("#chat-yt-bar")! as HTMLElement;
+  ytFetchBtn.disabled = true;
+  ytFetchBtn.textContent = "\u23F3";
+  try {
+    const resp = await fetch("/api/youtube/transcript", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url }),
+    });
+    const data = await resp.json();
+    if (data.error) {
+      alert(`Transcript error: ${data.error}`);
+      return;
+    }
+    pendingTranscript = { url, text: data.text };
+    ytBar.style.display = "none";
+    (drawer.querySelector("#chat-yt-input")! as HTMLInputElement).value = "";
+    updatePreview();
+  } catch (err) {
+    alert(`Failed to fetch transcript: ${err}`);
+  } finally {
+    ytFetchBtn.disabled = false;
+    ytFetchBtn.textContent = "Fetch";
   }
 }
 
@@ -231,7 +299,7 @@ function addBubble(role: "user" | "assistant", text: string, screenshot?: string
 
 async function sendMessage() {
   const text = inputEl.value.trim();
-  if (!text && !pendingScreenshot && !pendingCsv) return;
+  if (!text && !pendingScreenshot && !pendingCsv && !pendingTranscript) return;
 
   const apiKey = getApiKey();
   if (!apiKey) {
@@ -248,14 +316,20 @@ async function sendMessage() {
     content.push({ type: "image_url", image_url: { url: screenshot } });
   }
   const csv = pendingCsv;
-  const userText = text || (screenshot ? "What do you see in this chart?" : "Analyze this data.");
+  const transcript = pendingTranscript;
+  const userText = text || (screenshot ? "What do you see in this chart?" : transcript ? "Summarize the key trading insights from this transcript." : "Analyze this data.");
   let msgText = `[Context: ${contextFn()}]\n\n${userText}`;
   if (csv) {
     msgText += `\n\n[Bar Data CSV]\n${csv}`;
   }
+  if (transcript) {
+    msgText += `\n\n[YouTube Transcript: ${transcript.url}]\n${transcript.text}`;
+  }
   content.push({ type: "text", text: msgText });
 
-  const bubbleLabel = userText + (csv ? ` [📊 ${csv.split("\n").length - 1} bars]` : "");
+  const bubbleLabel = userText
+    + (csv ? ` [📊 ${csv.split("\n").length - 1} bars]` : "")
+    + (transcript ? ` [📺 ${transcript.url.replace(/.*v=/, "").slice(0, 11)}]` : "");
   addBubble("user", bubbleLabel, screenshot ?? undefined);
   inputEl.value = "";
   clearPreview();
