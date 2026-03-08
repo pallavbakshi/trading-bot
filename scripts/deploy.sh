@@ -60,14 +60,14 @@ sleep 1
 mkdir -p $LOG_DIR
 
 echo "  → start server"
-nohup uv run python -m src.server \
+PYTHONUNBUFFERED=1 nohup uv run python -m src.server \
     --data-dir data/nse \
     --results results/nse/patterns.json \
     --static-dir web/dist \
     --port $PORT \
     > $LOG_DIR/server.log 2>&1 &
 
-sleep 2
+sleep 6
 if lsof -ti:$PORT >/dev/null 2>&1; then
     echo "  server running on :$PORT"
 else
