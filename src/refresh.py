@@ -178,7 +178,8 @@ def _merge(csv_path: Path, new_path: Path):
         )
 
     original_rows = len(existing)
-    original_last = datetime.fromtimestamp(int(existing["time"].iloc[-1])).date()
+    original_last_row = existing.iloc[-1]
+    original_last = datetime.fromtimestamp(int(original_last_row["time"])).date()
 
     # Trim the last row of existing (it gets replaced by fresh download)
     trimmed = existing.iloc[:-1].copy()
@@ -202,6 +203,22 @@ def _merge(csv_path: Path, new_path: Path):
     combined.to_csv(csv_path, index=False)
     print(f"    merged: {original_rows} → {final_rows} rows "
           f"(+{added} new bars, last date: {final_last})")
+
+    # Show before/after diff for the replaced last row
+    new_last_row = combined[combined["time"] == original_last_row["time"]]
+    if not new_last_row.empty:
+        old = original_last_row
+        new = new_last_row.iloc[0]
+        diffs = [
+            col for col in ["open", "high", "low", "close", "Volume"]
+            if round(float(old[col]), 4) != round(float(new[col]), 4)
+        ]
+        if diffs:
+            print(f"    last row ({original_last}) changed:")
+            for col in diffs:
+                print(f"      {col}: {old[col]} → {new[col]}")
+        else:
+            print(f"    last row ({original_last}): no change in OHLCV")
 
 
 def _clear_cache(ticker: str):
