@@ -681,3 +681,18 @@ input[type="range"]::-moz-range-thumb {
 #history-list > div:hover {
   background: rgba(0,0,0,0.02);
 }
+
+/* ── Mini overview bar ── */
+#overview-container {
+  width: 100%;
+  border: 1px solid var(--color-border);
+  border-radius: 4px;
+  overflow: hidden;
+  background: var(--color-bg-panel);
+}
+#overview-canvas {
+  display: block;
+  width: 100%;
+  height: 48px;
+  cursor: crosshair;
+}

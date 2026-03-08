@@ -1,6 +1,7 @@
 import "./styles.css";
 import * as d3 from "d3";
 import { initChat } from "./chat";
+import { initOverview, updateOverview, setOverviewVisible } from "./overview";
 import type {
   Bar,
   TickerResult,
@@ -225,6 +226,13 @@ async function init() {
       }
     }
     return rows.join("\n");
+  });
+
+  // Mini overview bar (outside snapshot-region)
+  const overviewContainer = document.getElementById("overview-container")!;
+  initOverview(overviewContainer, (start, end) => {
+    visibleRange = [start, end];
+    draw();
   });
 
   await loadTicker(tickers[0].ticker);
@@ -886,6 +894,10 @@ function scheduleCheckLLMCache() {
 
 function draw() {
   if (bars.length === 0) return;
+
+  // Update mini overview bar
+  setOverviewVisible(visibleRange[0], visibleRange[1]);
+  updateOverview(bars, visibleRange[0], visibleRange[1]);
 
   // Clear LLM levels if the chart state they were loaded for has changed,
   // then schedule a cache lookup for the new state (once per unique key, not every draw).
