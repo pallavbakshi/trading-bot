@@ -28,12 +28,12 @@ else
     info "no local data/ — skipping"
 fi
 
-if [ -d "$LOCAL_DIR/results" ]; then
-    info "syncing results/..."
-    rsync -az --delete "$LOCAL_DIR/results/" "$REMOTE:$REMOTE_DIR/results/"
-    ok "results/ synced"
+if [ -d "$LOCAL_DIR/results/nse" ]; then
+    info "syncing results/nse/ (patterns only)..."
+    rsync -az --delete "$LOCAL_DIR/results/nse/" "$REMOTE:$REMOTE_DIR/results/nse/"
+    ok "results/nse/ synced"
 else
-    info "no local results/ — skipping"
+    info "no local results/nse/ — skipping"
 fi
 
 # ── 3. Remote: pull, install deps, build frontend, restart server ─────────────

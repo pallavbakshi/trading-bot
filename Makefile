@@ -1,4 +1,4 @@
-.PHONY: dev api web scan install check-remote deploy
+.PHONY: dev api web scan install check-remote upload-data deploy
 
 # Start both API server and Vite dev server
 dev:
@@ -33,6 +33,16 @@ install:
 # Check remote server readiness (TA-Lib, Node, uv, cloudflared, disk, etc.)
 check-remote:
 	@bash scripts/check-remote.sh
+
+# Upload data/ and results/nse/ to remote (rsync, skips unchanged files)
+upload-data:
+	@echo "Syncing data/..."
+	@rsync -avz --progress data/ aiadmin@100.88.77.72:~/projects/trading-bot/data/
+	@if [ -d results/nse ]; then \
+	    echo "Syncing results/nse/ (patterns)..."; \
+	    rsync -avz --progress results/nse/ aiadmin@100.88.77.72:~/projects/trading-bot/results/nse/; \
+	fi
+	@echo "Done."
 
 # Deploy to remote: push code, rsync data, rebuild, restart server + tunnel
 deploy:
