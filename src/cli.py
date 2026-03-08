@@ -21,6 +21,8 @@ Usage:
   tb state
   tb chats
   tb chatlog <chat_id>
+  tb keylevels
+  tb keylevels --image snap.png --model google/gemini-3.1-pro-preview
 """
 
 import argparse
@@ -163,6 +165,12 @@ def main():
     # state
     sub.add_parser("state", help="Show current chart state")
 
+    # keylevels
+    kl = sub.add_parser("keylevels", help="Snapshot chart, ask LLM to identify S/R levels, display on chart")
+    kl.add_argument("--image", help="Use existing image instead of taking a snapshot")
+    kl.add_argument("--model", default=None, help="Model to use for analysis")
+    kl.add_argument("--save-dir", default=".cache/keylevels", help="Directory to save results")
+
     # chatlog
     cl = sub.add_parser("chatlog", help="Print chat history")
     cl.add_argument("chat_id", help="Chat ID to display")
@@ -175,6 +183,8 @@ def main():
     rp.add_argument("--output", default="results/backtest", help="Output root directory")
     rp.add_argument("--capital", type=float, default=100000)
     rp.add_argument("--per-trade", type=float, default=100)
+    rp.add_argument("--market-open", action="store_true",
+                    help="Re-evaluate using T+1 open as entry (ignore LLM limit price)")
 
     # backtest
     bt = sub.add_parser("backtest", help="Run automated backtest across dates")
@@ -296,6 +306,84 @@ def main():
             print(f"  RSI:          {'on' if state.get('rsi') else 'off'}")
             print(f"  AVWAP:        {'on' if state.get('avwap') else 'off'}")
 
+    elif cmd_name == "keylevels":
+        import base64 as b64mod
+
+        # 1. Get current chart state
+        state = _get_state()
+        ticker    = (state.get("ticker") or "UNKNOWN").upper()
+        date      = state.get("date") or "unknown"
+        vdr       = state.get("vdr") or ["", ""]
+        vdr_start = vdr[0] if isinstance(vdr, list) else ""
+        vdr_end   = vdr[1] if isinstance(vdr, list) else ""
+        interval  = state.get("interval") or "daily"
+
+        # 2. Snapshot (or use provided image)
+        if args.image:
+            image_path = args.image
+            csv_text = ""
+            print(f"Using provided image: {image_path}")
+        else:
+            save_dir = str(Path(".cache/snapshots").resolve())
+            send({"action": "snapshot", "save_dir": save_dir})
+            result = _poll_snapshot(timeout=15)
+            if not result or not result.get("ok"):
+                print("Snapshot failed", file=sys.stderr)
+                sys.exit(1)
+            image_path = result["png"]
+            csv_path   = result.get("csv", "")
+            csv_text   = Path(csv_path).read_text() if csv_path and Path(csv_path).exists() else ""
+            print(f"Snapshot: {image_path}")
+
+        # 3. POST to server (which handles cache + LLM in background thread)
+        png_b64 = "data:image/png;base64," + b64mod.b64encode(
+            Path(image_path).read_bytes()
+        ).decode()
+
+        payload = json.dumps({
+            "png": png_b64, "csv": csv_text,
+            "ticker": ticker, "date": date,
+            "vdr_start": vdr_start, "vdr_end": vdr_end,
+            "interval": interval,
+            "model": args.model,
+        }).encode()
+        req = urllib.request.Request(
+            "http://127.0.0.1:8000/api/keylevels", data=payload,
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req) as r:
+            init = json.loads(r.read())
+        if not init.get("ok"):
+            print(f"keylevels error: {init}", file=sys.stderr)
+            sys.exit(1)
+
+        if init.get("pending"):
+            print("Analysing with LLM (this may take ~30s)...")
+
+        # 4. Poll for result
+        import time as _time
+        result = None
+        t0 = _time.time()
+        while _time.time() - t0 < 120:
+            _time.sleep(1)
+            with urllib.request.urlopen("http://127.0.0.1:8000/api/keylevels/result") as r:
+                data = json.loads(r.read())
+            if data:
+                result = data
+                break
+        if not result or not result.get("ok"):
+            print(f"keylevels failed: {result}", file=sys.stderr)
+            sys.exit(1)
+
+        resistance = result["resistance"]
+        support    = result["support"]
+        cached     = result.get("cached", False)
+        print(f"  {'(cached) ' if cached else ''}Resistance: {resistance}")
+        print(f"  {'(cached) ' if cached else ''}Support:    {support}")
+
+        # 5. Display on chart
+        send({"action": "key_levels", "resistance": resistance, "support": support})
+
     elif cmd_name == "chatlog":
         from src.openrouter import Chat
         chat = Chat.load(args.chat_id)
@@ -323,7 +411,8 @@ def main():
         print(f"Reprocessing {ticker} results...")
         trades = reprocess_results(ticker, output_dir, df,
                                    getattr(args, "start", None),
-                                   getattr(args, "end", None))
+                                   getattr(args, "end", None),
+                                   market_open=args.market_open)
         if trades:
             model = next((t.get("model") for t in trades if t.get("model")), "unknown")
             lookback = next((t.get("lookback") for t in trades if t.get("lookback")), "6M")

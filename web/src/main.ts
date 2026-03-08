@@ -72,6 +72,8 @@ let showVolProfile = DEFAULTS.showVolProfile;
 let showSMA = DEFAULTS.showSMA;
 let showRSI = DEFAULTS.showRSI;
 let showAVWAP = DEFAULTS.showAVWAP;
+let showLLMLevels = false;
+let llmLevels: { resistance: number[]; support: number[] } | null = null;
 let timeframe = DEFAULTS.interval;
 let activeTfDays: number | null = null; // tracks lookback selection
 let activeLfDays: number | null = null; // tracks lookforward selection
@@ -104,6 +106,7 @@ let gYVolAxis: d3.Selection<SVGGElement, unknown, HTMLElement, unknown>;
 let gVolProfile: d3.Selection<SVGGElement, unknown, HTMLElement, unknown>;
 let gSMA: d3.Selection<SVGGElement, unknown, HTMLElement, unknown>;
 let gAVWAP: d3.Selection<SVGGElement, unknown, HTMLElement, unknown>;
+let gLLMLevels: d3.Selection<SVGGElement, unknown, HTMLElement, unknown>;
 let gRSI: d3.Selection<SVGGElement, unknown, HTMLElement, unknown>;
 let gYRSIAxis: d3.Selection<SVGGElement, unknown, HTMLElement, unknown>;
 let gCrosshair: d3.Selection<SVGGElement, unknown, HTMLElement, unknown>;
@@ -774,6 +777,9 @@ function setupSVG() {
   gAVWAP = svg.append("g")
     .attr("transform", `translate(${margin.left},${margin.top})`)
     .attr("clip-path", "url(#clip-price)");
+  gLLMLevels = svg.append("g")
+    .attr("transform", `translate(${margin.left},${margin.top})`)
+    .attr("clip-path", "url(#clip-price)");
   gOverlay = svg.append("g")
     .attr("transform", `translate(${margin.left},${margin.top})`)
     .attr("clip-path", "url(#clip-price)");
@@ -980,6 +986,7 @@ function draw() {
   drawVolumeProfile(visible, sliderDate);
   drawSMA(visible);
   drawAVWAP(visible, sliderDate);
+  drawLLMLevels();
   drawOverlays(visible, sliderDate);
   drawRSI(visible, sliderDate);
   positionNowHandle();
@@ -1332,6 +1339,31 @@ function drawAVWAP(visible: Bar[], sliderDate: string) {
       .attr("font-size", "9px").attr("fill", "#22c55e").attr("opacity", 0.8)
       .text("AVWAP↑");
   }
+}
+
+// ── LLM Key Levels ─────────────────────────────────────────────────────
+function drawLLMLevels() {
+  gLLMLevels.selectAll("*").remove();
+  if (!showLLMLevels || !llmLevels || !yPrice) return;
+
+  const chartW = W - margin.left - margin.right;
+
+  const drawLevel = (price: number, color: string) => {
+    const y = yPrice(price);
+    gLLMLevels.append("line")
+      .attr("x1", 0).attr("x2", chartW)
+      .attr("y1", y).attr("y2", y)
+      .attr("stroke", color).attr("stroke-width", 1)
+      .attr("stroke-dasharray", "4,3").attr("opacity", 0.7);
+    gLLMLevels.append("text")
+      .attr("x", chartW - 4).attr("y", y - 2)
+      .attr("font-size", "9px").attr("fill", color).attr("opacity", 0.85)
+      .attr("text-anchor", "end")
+      .text(price.toFixed(2));
+  };
+
+  (llmLevels.resistance || []).forEach(p => drawLevel(p, "#ef4444"));
+  (llmLevels.support    || []).forEach(p => drawLevel(p, "#22c55e"));
 }
 
 // ── RSI Panel ──────────────────────────────────────────────────────────
@@ -1977,6 +2009,7 @@ document.getElementById("avwap-toggle")!.addEventListener("change", (e) => {
   draw();
 });
 
+
 document.querySelectorAll(".tf-btn").forEach(btn => {
   btn.addEventListener("click", () => {
     const days = parseInt((btn as HTMLElement).dataset.days!);
@@ -2083,6 +2116,23 @@ async function executeCommand(cmd: { action: string; [key: string]: unknown }) {
       } else if (key === "avwap") {
         showAVWAP = on;
         (document.getElementById("avwap-toggle") as HTMLInputElement).checked = on;
+      } else if (key === "llm-levels") {
+        showLLMLevels = on;
+        const klBtn = document.getElementById("keylevels-btn") as HTMLButtonElement;
+        if (klBtn) klBtn.style.opacity = on ? "1" : "0.5";
+      }
+      draw();
+      break;
+    }
+
+    case "key_levels": {
+      llmLevels = {
+        resistance: Array.isArray(cmd.resistance) ? cmd.resistance.map(Number) : [],
+        support: Array.isArray(cmd.support) ? cmd.support.map(Number) : [],
+      };
+      if (!showLLMLevels) {
+        showLLMLevels = true;
+        (document.getElementById("llm-levels-toggle") as HTMLInputElement).checked = true;
       }
       draw();
       break;
@@ -2107,6 +2157,32 @@ async function executeCommand(cmd: { action: string; [key: string]: unknown }) {
     case "zoom": {
       const count = Number(cmd.value);
       if (count > 0) zoomCenteredOnNow(count);
+      break;
+    }
+
+    case "reset": {
+      const ticker = cmd.ticker ? String(cmd.ticker).toUpperCase() : currentTicker;
+      // Reset all state variables to defaults
+      timeframe = DEFAULTS.interval;
+      dateMode = DEFAULTS.dateMode;
+      showVolProfile = DEFAULTS.showVolProfile;
+      showSMA = DEFAULTS.showSMA;
+      showRSI = DEFAULTS.showRSI;
+      showAVWAP = DEFAULTS.showAVWAP;
+      activeTfDays = null;
+      activeLfDays = null;
+      // Sync UI toggles
+      (document.getElementById("td-toggle") as HTMLInputElement).checked = false;
+      (document.getElementById("vp-toggle") as HTMLInputElement).checked = false;
+      (document.getElementById("sma-toggle") as HTMLInputElement).checked = false;
+      (document.getElementById("rsi-toggle") as HTMLInputElement).checked = false;
+      (document.getElementById("avwap-toggle") as HTMLInputElement).checked = false;
+      showLLMLevels = false;
+      llmLevels = null;
+      const klBtn = document.getElementById("keylevels-btn") as HTMLButtonElement;
+      if (klBtn) { klBtn.textContent = "📍 Key Levels"; klBtn.style.opacity = "1"; }
+      // Reload ticker data fresh (force=true bypasses same-ticker guard)
+      await loadTicker(ticker, true);
       break;
     }
 
@@ -2489,6 +2565,76 @@ async function takeSnapshot(saveDir: string | null = null, customPrefix?: string
 }
 
 document.getElementById("snapshot-btn")!.addEventListener("click", () => takeSnapshot());
+
+// ── Key Levels (LLM S/R analysis) ──────────────────────────────────────
+async function requestKeyLevels() {
+  const btn = document.getElementById("keylevels-btn") as HTMLButtonElement;
+
+  // If levels already loaded, just toggle visibility
+  if (llmLevels) {
+    showLLMLevels = !showLLMLevels;
+    btn.style.opacity = showLLMLevels ? "1" : "0.5";
+    draw();
+    return;
+  }
+
+  const sliderDate = bars[sliderIndex]?.date ?? "";
+  const [v0, v1] = visibleRange;
+  const vdrStart = bars[v0]?.date ?? "";
+  const vdrEnd   = bars[v1]?.date ?? "";
+
+  btn.disabled = true;
+  btn.textContent = "Analysing…";
+
+  try {
+    const { default: html2canvas } = await import("html2canvas");
+    const el = document.getElementById("snapshot-region")!;
+    const canvas = await html2canvas(el, { backgroundColor: "#ffffff", scale: 2 });
+    const png = canvas.toDataURL("image/png");
+    const csv = buildSnapshotCsv();
+
+    const resp = await fetch("/api/keylevels", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        png, csv,
+        ticker: currentTicker,
+        date: sliderDate,
+        vdr_start: vdrStart,
+        vdr_end: vdrEnd,
+        interval: timeframe,
+        trading_days: dateMode === "trading",
+        t_lookback: sliderIndex - v0,
+        t_lookforward: v1 - sliderIndex,
+      }),
+    });
+    const init = await resp.json();
+    if (!init.ok) { console.error("keylevels start failed:", init); return; }
+
+    // Poll for result (covers both cache-hit and pending cases)
+    let result: any = null;
+    const deadline = Date.now() + 120_000;
+    while (Date.now() < deadline) {
+      await new Promise(r => setTimeout(r, 1000));
+      const r = await fetch("/api/keylevels/result");
+      const data = await r.json();
+      if (data) { result = data; break; }
+    }
+
+    if (!result?.ok) { console.error("keylevels failed:", result); return; }
+
+    await executeCommand({
+      action: "key_levels",
+      resistance: result.resistance,
+      support: result.support,
+    });
+  } finally {
+    btn.textContent = "📍 Key Levels";
+    btn.disabled = false;
+  }
+}
+
+document.getElementById("keylevels-btn")!.addEventListener("click", requestKeyLevels);
 
 // ── Start ──────────────────────────────────────────────────────────────
 init();

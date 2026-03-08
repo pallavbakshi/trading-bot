@@ -10,6 +10,7 @@ All pre-computed and cached on first request.
 
 import json
 import sys
+import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 
@@ -29,6 +30,9 @@ _command_queue: list[dict] = []
 _snapshot_result: dict | None = None
 # Chart state (posted by frontend on every draw)
 _chart_state: dict = {}
+# Key levels analysis result (set by background LLM thread, polled by frontend)
+_keylevels_result: dict | None = None
+_kl_lock = threading.Lock()
 
 
 def _find_csv(ticker: str, data_dirs: list[str]) -> Path | None:
@@ -271,6 +275,14 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 self._json(None)
 
+        elif path == "/api/keylevels/result":
+            global _keylevels_result
+            with _kl_lock:
+                result = _keylevels_result
+                if result:
+                    _keylevels_result = None
+            self._json(result)
+
         else:
             self.send_error(404)
 
@@ -295,6 +307,124 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"ok": True})
             except json.JSONDecodeError:
                 self.send_error(400, "Invalid JSON")
+
+        elif path == "/api/keylevels":
+            global _keylevels_result
+            length = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(length)
+            try:
+                data = json.loads(body)
+            except json.JSONDecodeError:
+                self.send_error(400, "Invalid JSON")
+                return
+
+            ticker        = data.get("ticker", "UNKNOWN").upper()
+            date          = data.get("date", "unknown")
+            vdr_start     = data.get("vdr_start", "")
+            vdr_end       = data.get("vdr_end", "")
+            interval      = data.get("interval", "daily")
+            trading_days  = bool(data.get("trading_days", False))
+            t_lookback    = int(data.get("t_lookback", 0))
+            t_lookforward = int(data.get("t_lookforward", 0))
+            model         = data.get("model", None)
+
+            # Cache check — all four dimensions must match
+            safe_key   = f"{ticker}_{date}_{vdr_start}_{vdr_end}_{interval}"
+            cache_path = Path(".cache/keylevels") / f"{safe_key}.json"
+
+            if cache_path.exists():
+                cached = json.loads(cache_path.read_text())
+                with _kl_lock:
+                    _keylevels_result = {"ok": True, "cached": True, **cached}
+                print(f"  keylevels cache hit: {safe_key}")
+                self._json({"ok": True, "pending": False})
+                return
+
+            # Cache miss — start background LLM thread
+            png_b64  = data.get("png", "")
+            csv_text = data.get("csv", "")
+
+            with _kl_lock:
+                _keylevels_result = None
+
+            def _run(ticker=ticker, date=date, vdr_start=vdr_start, vdr_end=vdr_end,
+                     interval=interval, trading_days=trading_days,
+                     t_lookback=t_lookback, t_lookforward=t_lookforward,
+                     model=model, png_b64=png_b64, csv_text=csv_text, cache_path=cache_path):
+                global _keylevels_result
+                import base64 as b64mod, tempfile
+                tmp_png = None
+                try:
+                    candle_label = {"daily": "daily", "weekly": "weekly", "monthly": "monthly"}.get(interval, interval)
+                    if trading_days:
+                        date_desc = (f"T+0 (current bar), showing T-{t_lookback} to T+{t_lookforward} "
+                                     f"({t_lookback + t_lookforward + 1} trading day bars total)")
+                    else:
+                        date_desc = (f"{date} (current bar), visible range {vdr_start} to {vdr_end}")
+                    print(f"  keylevels: analysing {ticker} {date} ({candle_label}) ...")
+                    png_data = png_b64.split(",", 1)[-1]
+                    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+                        f.write(b64mod.b64decode(png_data))
+                        tmp_png = f.name
+
+                    from src.openrouter import Chat, MODELS
+                    use_model = model or MODELS[1]   # default: gemini-pro (vision)
+                    chat = Chat(model=use_model)
+
+                    # Turn 1 — free-form identification
+                    chat.send(
+                        text=(
+                            f"This chart shows {candle_label} candles. Current bar is at {date_desc}. "
+                            "Identify ALL major resistance and support levels clearly visible in the chart. "
+                            "Consider: swing highs/lows, consolidation zones, volume shelves, "
+                            "and price levels that have been tested multiple times. "
+                            "List each level with its specific price value."
+                        ),
+                        image_path=tmp_png,
+                        attachment_text=csv_text if csv_text else None,
+                    )
+
+                    # Turn 2 — JSON extraction
+                    reply2 = chat.send(
+                        text=(
+                            "Now output ONLY a JSON object with the key levels you identified:\n"
+                            "{\"resistance\": [price1, price2, ...], \"support\": [price1, price2, ...]}\n"
+                            "Use exact numeric prices. No text, no markdown, just the JSON."
+                        ),
+                    )
+
+                    raw = reply2.strip()
+                    if "```" in raw:
+                        raw = raw.split("```")[1]
+                        if raw.startswith("json"):
+                            raw = raw[4:]
+                    levels = json.loads(raw.strip())
+                    resistance = sorted([float(x) for x in levels.get("resistance", [])], reverse=True)
+                    support    = sorted([float(x) for x in levels.get("support", [])],    reverse=True)
+
+                    # Save cache
+                    cache_path.parent.mkdir(parents=True, exist_ok=True)
+                    cache_path.write_text(json.dumps({
+                        "ticker": ticker, "date": date,
+                        "vdr_start": vdr_start, "vdr_end": vdr_end,
+                        "interval": interval, "model": use_model,
+                        "resistance": resistance, "support": support,
+                    }, indent=2))
+                    print(f"  keylevels: R={resistance} S={support}")
+
+                    with _kl_lock:
+                        _keylevels_result = {"ok": True, "resistance": resistance, "support": support}
+
+                except Exception as e:
+                    print(f"  keylevels error: {e}")
+                    with _kl_lock:
+                        _keylevels_result = {"ok": False, "error": str(e)}
+                finally:
+                    if tmp_png:
+                        Path(tmp_png).unlink(missing_ok=True)
+
+            threading.Thread(target=_run, daemon=True).start()
+            self._json({"ok": True, "pending": True})
 
         elif path == "/api/snapshot/save":
             import base64

@@ -50,11 +50,11 @@ WEEKLY_PROMPT = (
 DAILY_PROMPT = (
     "Here is the daily chart ({lookback} lookback with Volume Profile) for the same stock. "
     "Based on the weekly structure above and what you see on the daily, take a specific position: "
-    "direction (long or short), entry price, stop loss, take profit, and max trading days. "
+    "direction (long or short), stop loss, take profit, and max trading days. "
     "\n\nIMPORTANT: You are viewing the chart at market close (end of day). The trade "
-    "executes on the NEXT trading day (T+1) as a limit order at your entry price. "
-    "If T+1 price action never reaches your entry price, the trade is NOT taken. "
-    "Choose an entry price realistic for T+1."
+    "executes at the MARKET OPEN of the next trading day (T+1) — no entry price needed. "
+    "Set your stop loss and take profit as absolute price levels based on chart structure "
+    "(support/resistance zones, ATR, key levels). Do NOT set them relative to an unknown entry."
 )
 
 CONTEXT_PROMPT = (
@@ -63,7 +63,7 @@ CONTEXT_PROMPT = (
     "[Visible bar data CSV]\n{csv}\n\n"
     "Review this data and confirm or update your position. "
     "State your FINAL position clearly with all parameters — even if unchanged: "
-    "direction, entry, stop loss, take profit, max_days, confidence (low/medium/high), "
+    "direction, stop loss, take profit, max_days, confidence (low/medium/high), "
     "and a one-sentence rationale."
 )
 
@@ -71,11 +71,11 @@ JSON_PROMPT = (
     'Based on the analyst\'s final position statement above, extract a structured JSON '
     'with exactly these fields: '
     '{{"ticker": "{ticker}", "date": "{date}", "direction": "long|short", '
-    '"entry": <price>, "stop_loss": <price>, "take_profit": <price>, '
+    '"stop_loss": <price>, "take_profit": <price>, '
     '"max_days": <int>, "risk_reward": <float>, "confidence": "low|medium|high", '
     '"key_levels": {{"resistance": [<prices>], "support": [<prices>]}}, '
     '"rationale": "<1 sentence>"}} '
-    '— "entry" is the limit order price for T+1 (next trading day). '
+    '— trade enters at T+1 market open; stop_loss and take_profit are absolute price levels. '
     'Return ONLY the JSON, no markdown fences, no explanation.'
 )
 
@@ -215,12 +215,15 @@ def _toggle(key: str, value: str):
 # ── Trade evaluation ────────────────────────────────────────────────────
 
 def _check_trade(df, analysis_date: str, entry: float, stop_loss: float,
-                 take_profit: float, max_days: int, direction: str) -> dict:
+                 take_profit: float, max_days: int, direction: str,
+                 market_open: bool = False) -> dict:
     """Check trade outcome against actual price data.
 
     T+1 (next trading day after analysis_date) is the entry day.
-    Entry is a limit order: if T+1 low <= entry <= T+1 high, we enter.
-    SL and TP are live immediately — can trigger on T+1 itself.
+    market_open=False (default): entry is a limit order — fills only if
+        T+1 low <= entry <= T+1 high.
+    market_open=True: always enter at T+1 open price, ignore entry price.
+    SL and TP are absolute price levels, live from T+1 onward.
     max_days counts from entry (T+1 = day 1).
     """
     dates = [str(d) for d in df.index]
@@ -239,7 +242,7 @@ def _check_trade(df, analysis_date: str, entry: float, stop_loss: float,
 
     is_short = direction.lower() == "short"
 
-    # T+1: entry day — check if limit order fills
+    # T+1: entry day
     entry_row = df.iloc[idx + 1]
     entry_date = dates[idx + 1]
     entry_day = {
@@ -251,7 +254,30 @@ def _check_trade(df, analysis_date: str, entry: float, stop_loss: float,
         "volume": int(entry_row["Volume"]),
     }
 
-    if not (float(entry_row["Low"]) <= entry <= float(entry_row["High"])):
+    if market_open:
+        # Always fill at T+1 open — unless open has already gapped through SL or TP
+        entry = round(float(entry_row["Open"]), 2)
+        if is_short:
+            gap_sl = entry >= stop_loss   # gapped up past stop loss
+            gap_tp = entry <= take_profit  # gapped down past take profit
+        else:
+            gap_sl = entry <= stop_loss   # gapped down past stop loss
+            gap_tp = entry >= take_profit  # gapped up past take profit
+        if gap_sl or gap_tp:
+            reason = "gap_through_sl" if gap_sl else "gap_through_tp"
+            return {
+                "result": {
+                    "outcome": "no_entry",
+                    "reason": reason,
+                    "entry_date": entry_date,
+                    "t1_open": entry,
+                    "stop_loss": stop_loss,
+                    "take_profit": take_profit,
+                    "pnl": 0,
+                },
+                "daily_data": [entry_day],
+            }
+    elif not (float(entry_row["Low"]) <= entry <= float(entry_row["High"])):
         return {
             "result": {
                 "outcome": "no_entry",
@@ -353,7 +379,8 @@ def _check_trade(df, analysis_date: str, entry: float, stop_loss: float,
 # ── Reprocess existing results ──────────────────────────────────────────
 
 def reprocess_results(ticker: str, output_dir: Path, df,
-                      start: str | None = None, end: str | None = None) -> list[dict]:
+                      start: str | None = None, end: str | None = None,
+                      market_open: bool = False) -> list[dict]:
     """Re-evaluate existing trade.json files, updating actual outcome + new metrics."""
     ticker_dir = output_dir / ticker
     if not ticker_dir.exists():
@@ -376,17 +403,23 @@ def reprocess_results(ticker: str, output_dir: Path, df,
             print(f"  [{date}] WARN: bad JSON, skipping")
             continue
 
-        if "entry" in trade:
+        if "stop_loss" in trade and "take_profit" in trade:
             actual = _check_trade(
                 df, date,
-                entry=float(trade["entry"]),
+                entry=float(trade.get("entry", 0)),
                 stop_loss=float(trade["stop_loss"]),
                 take_profit=float(trade["take_profit"]),
                 max_days=int(trade["max_days"]),
                 direction=trade.get("direction", "long"),
+                market_open=market_open,
             )
-            trade["actual"] = actual
+            if market_open:
+                trade["actual_market_open"] = actual
+            else:
+                trade["actual"] = actual
             trade_file.write_text(json.dumps(trade, indent=2))
+            # Always expose under "actual" in-memory so _print_report works for both modes
+            trade["actual"] = actual
             res = actual.get("result", {})
             outcome = res.get("outcome", "?")
             if outcome == "no_entry":
@@ -426,13 +459,22 @@ def _verify_state(date: str, lookback: str, expect_overlays: dict | None = None)
     return None
 
 
+def _reset_chart(ticker: str) -> None:
+    """Send a full reset command: reloads ticker data and restores all defaults."""
+    log.debug("reset_chart: ticker=%s", ticker)
+    _send_cmd({"action": "reset", "ticker": ticker})
+    _wait_for_state("ticker", ticker.upper(), timeout=15)
+    time.sleep(2)  # allow full reload + render
+
+
 def _setup_chart(ticker: str, date: str, lookback: str) -> str | None:
     log.debug("setup_chart: ticker=%s date=%s lookback=%s", ticker, date, lookback)
     state = _get_state()
     if state.get("ticker") != ticker.upper():
         _send_cmd({"action": "ticker", "value": ticker})
-        if not _wait_for_state("ticker", ticker.upper(), timeout=10):
-            return "ticker did not change"
+        if not _wait_for_state("ticker", ticker.upper(), timeout=15):
+            if _get_state().get("ticker") != ticker.upper():
+                return "ticker did not change"
         time.sleep(1)
 
     _toggle("trading-days", "on")
@@ -440,7 +482,9 @@ def _setup_chart(ticker: str, date: str, lookback: str) -> str | None:
     _toggle("rsi", "off")
     _toggle("sma", "off")
     _toggle("avwap", "off")
-    _wait_for_state("trading_days", True, timeout=3)
+    _wait_for_state("trading_days", True, timeout=5)
+    _wait_for_state("volume_profile", False, timeout=5)
+    _wait_for_state("rsi", False, timeout=5)
 
     _send_cmd({"action": "gtd", "value": date})
     if not _wait_for_date(date):
@@ -450,7 +494,7 @@ def _setup_chart(ticker: str, date: str, lookback: str) -> str | None:
     if not _wait_for_state("lookback", LOOKBACK_DAYS.get(lookback)):
         return f"lookback {lookback} did not take effect"
 
-    time.sleep(0.3)
+    time.sleep(0.5)
     return _verify_state(date, lookback, {"volume_profile": False, "rsi": False})
 
 
@@ -476,17 +520,24 @@ def capture_date(ticker: str, date: str, lookback: str,
     date_dir.mkdir(parents=True, exist_ok=True)
     save_dir = str(date_dir.resolve())
 
-    # 1. Setup chart (with retries)
+    # 1. Setup chart (with retries + escalating delays + full reset on last attempt)
+    SETUP_DELAYS = [1, 2, 5]  # seconds to wait before attempts 2, 3, 4
     print(f"  [capture] Setting up chart...")
-    for attempt in range(1, MAX_RETRIES + 2):
+    for attempt in range(1, len(SETUP_DELAYS) + 2):
+        if attempt > len(SETUP_DELAYS):
+            # Nuclear option: full chart reset before final attempt
+            print(f"        Full chart reset (ticker={ticker})...")
+            _reset_chart(ticker)
         err = _setup_chart(ticker, date, lookback)
         if err is None:
             break
         print(f"        Attempt {attempt} failed: {err}")
-        if attempt > MAX_RETRIES:
-            print(f"  ABORT: could not set up chart after {MAX_RETRIES + 1} attempts")
+        if attempt > len(SETUP_DELAYS):
+            print(f"  ABORT: could not set up chart after {attempt} attempts")
             return None
-        time.sleep(1)
+        delay = SETUP_DELAYS[attempt - 1]
+        print(f"        Waiting {delay}s before retry...")
+        time.sleep(delay)
 
     state = _get_state()
     print(f"        Date: {state.get('date')}  Lookback: {state.get('lookback')}  "
@@ -500,7 +551,7 @@ def capture_date(ticker: str, date: str, lookback: str,
     _toggle("rsi", "on")
     _wait_for_state("volume_profile", True, timeout=3)
     _wait_for_state("rsi", True, timeout=3)
-    time.sleep(0.3)
+    time.sleep(1.0)
     for attempt in range(1, MAX_RETRIES + 2):
         err = _verify_state(date, lookback, {"volume_profile": True, "rsi": True})
         if err:
@@ -511,6 +562,9 @@ def capture_date(ticker: str, date: str, lookback: str,
             _setup_chart(ticker, date, lookback)
             _toggle("vol-profile", "on")
             _toggle("rsi", "on")
+            _wait_for_state("volume_profile", True, timeout=3)
+            _wait_for_state("rsi", True, timeout=3)
+            time.sleep(1.0)
             continue
         result = _snapshot(save_dir, "daily")
         if result:
@@ -546,12 +600,16 @@ def capture_date(ticker: str, date: str, lookback: str,
     if weekly_png:
         print(f"        {weekly_png}")
 
-    # Restore: VP off, daily interval, original lookback
+    # Restore: VP off, RSI off, daily interval, original lookback
     _toggle("vol-profile", "off")
+    _toggle("rsi", "off")
     _send_cmd({"action": "interval", "value": "D"})
-    _wait_for_state("interval", "daily", timeout=3)
+    _wait_for_state("interval", "daily", timeout=5)
     _send_cmd({"action": "lookback", "value": lookback})
-    _wait_for_state("lookback", LOOKBACK_DAYS.get(lookback), timeout=3)
+    _wait_for_state("lookback", LOOKBACK_DAYS.get(lookback), timeout=5)
+    # Wait for chart to fully settle before next date's setup reads state
+    _wait_for_state("ticker", ticker.upper(), timeout=5)
+    time.sleep(0.5)
 
     log.debug("capture_date DONE: %s in %.1fs", date, time.time() - t0)
     return {
@@ -629,21 +687,22 @@ def analyze_date(ticker: str, date: str, lookback: str, model: str,
         print(f"  [{date} analyze] WARN: Failed to parse JSON")
         trade = {"error": "parse_failed", "raw": reply4}
 
-    # 7. Check actual result
-    if "entry" in trade:
+    # 7. Check actual result (always market-on-open)
+    if "stop_loss" in trade and "take_profit" in trade:
         actual = _check_trade(
             df, date,
-            entry=float(trade["entry"]),
+            entry=0,  # overridden by market_open=True
             stop_loss=float(trade["stop_loss"]),
             take_profit=float(trade["take_profit"]),
             max_days=int(trade["max_days"]),
             direction=trade["direction"],
+            market_open=True,
         )
         trade["actual"] = actual
         outcome = actual.get("result", {})
         if outcome.get("outcome") == "no_entry":
-            print(f"  [{date} analyze] NO ENTRY — T+1 range "
-                  f"{outcome.get('day_range')} didn't reach {outcome.get('requested_entry')}")
+            print(f"  [{date} analyze] NO ENTRY — {outcome.get('reason')} "
+                  f"(T+1 open: {outcome.get('t1_open')})")
         else:
             pnl = outcome.get("pnl", "?")
             print(f"  [{date} analyze] {outcome.get('outcome')} "
@@ -935,6 +994,44 @@ def _print_report(trades: list[dict], ticker: str, model: str,
     print(f"  Net P&L:      ${total_pnl_dollar:>+12,.2f}")
     print(f"  Return:       {ret:>+11.2f}%")
     print(f"  Max drawdown: {max_drawdown:>11.2f}%")
+
+    # Concurrent positions / capital utilisation
+    trading_days: set[str] = set()
+    for t in trades:
+        actual = t.get("actual", {})
+        for day in actual.get("daily_data", []):
+            trading_days.add(day["date"])
+        res = actual.get("result", {})
+        if res.get("entry_date"):
+            trading_days.add(res["entry_date"])
+
+    if trading_days:
+        open_intervals = []
+        for t in trades:
+            res = t.get("actual", {}).get("result", {})
+            if res.get("outcome") in ("no_entry", "no_data", None, "unknown"):
+                continue
+            ed, xd = res.get("entry_date", ""), res.get("exit_date", "")
+            if ed and xd:
+                open_intervals.append((ed, xd))
+
+        daily_counts = {}
+        for d in sorted(trading_days):
+            n = sum(1 for ed, xd in open_intervals if ed <= d <= xd)
+            if n > 0:
+                daily_counts[d] = n
+
+        if daily_counts:
+            avg_conc = sum(daily_counts.values()) / len(daily_counts)
+            max_conc = max(daily_counts.values())
+            avg_deployed = avg_conc * per_trade
+            max_deployed = max_conc * per_trade
+            ret_on_deployed = (total_pnl_dollar / avg_deployed * 100) if avg_deployed else 0
+            print()
+            print(f"  Avg concurrent positions: {avg_conc:.1f}  (max {max_conc})")
+            print(f"  Avg deployed capital:     ${avg_deployed:>10,.2f}  (max ${max_deployed:,.2f})")
+            print(f"  Return on deployed:       {ret_on_deployed:>+10.2f}%")
+
     print(f"{'=' * W}")
 
     summary = {
