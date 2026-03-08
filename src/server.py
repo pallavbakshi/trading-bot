@@ -366,18 +366,9 @@ class Handler(BaseHTTPRequestHandler):
             t_lookback    = int(data.get("t_lookback", 0))
             t_lookforward = int(data.get("t_lookforward", 0))
             model         = data.get("model", None)
-            youtube_urls  = [u for u in data.get("youtube_urls", []) if u and u.strip()]
-
             force      = bool(data.get("force", False))
 
-            # Cache key includes a short hash of any YouTube URLs so different videos
-            # produce different cached results.
-            import hashlib
-            yt_suffix = ""
-            if youtube_urls:
-                yt_hash = hashlib.md5(",".join(sorted(youtube_urls)).encode()).hexdigest()[:6]
-                yt_suffix = f"_yt{yt_hash}"
-            safe_key   = f"{ticker}_{date}_{vdr_start}_{vdr_end}_{interval}{yt_suffix}"
+            safe_key   = f"{ticker}_{date}_{vdr_start}_{vdr_end}_{interval}"
             cache_path = Path(".cache/keylevels") / f"{safe_key}.json"
 
             if not force and cache_path.exists():
@@ -398,8 +389,7 @@ class Handler(BaseHTTPRequestHandler):
             def _run(ticker=ticker, date=date, vdr_start=vdr_start, vdr_end=vdr_end,
                      interval=interval, trading_days=trading_days,
                      t_lookback=t_lookback, t_lookforward=t_lookforward,
-                     model=model, png_b64=png_b64, csv_text=csv_text, cache_path=cache_path,
-                     youtube_urls=youtube_urls):
+                     model=model, png_b64=png_b64, csv_text=csv_text, cache_path=cache_path):
                 global _keylevels_result
                 import base64 as b64mod, tempfile
                 tmp_png = None
@@ -420,31 +410,7 @@ class Handler(BaseHTTPRequestHandler):
                     use_model = model or MODELS[0]   # claude-sonnet-4.6 for vision
                     chat = Chat(model=use_model)
 
-                    # Fetch YouTube transcripts and build context block
-                    yt_context = ""
-                    if youtube_urls:
-                        from src.youtube import fetch_transcript
-                        for url in youtube_urls:
-                            print(f"  keylevels: fetching transcript for {url}")
-                            result = fetch_transcript(url)
-                            if "text" in result:
-                                # Trim to ~6000 chars to stay within reasonable token budget
-                                snippet = result["text"][:6000]
-                                yt_context += (
-                                    f"\n\n[YouTube video transcript: {url}]\n{snippet}"
-                                )
-                                print(f"  keylevels: transcript fetched ({len(result['text'])} chars)")
-                            else:
-                                print(f"  keylevels: transcript error for {url}: {result.get('error')}")
-
                     # Turn 1 — identify key levels
-                    yt_note = (
-                        " I have also provided transcripts from YouTube videos below — "
-                        "extract any key price levels, zones, or trading insights mentioned "
-                        "and factor them into your analysis alongside the chart."
-                        if yt_context else ""
-                    )
-                    attachment = (csv_text or "") + yt_context
                     chat.send(
                         text=(
                             f"This chart shows {candle_label} candles. Current bar is at {date_desc}. "
@@ -456,10 +422,9 @@ class Handler(BaseHTTPRequestHandler):
                             "A level qualifies if price has visibly reacted to it at least twice, "
                             "or it is a clear structural high/low/consolidation zone near the current bar. "
                             "Do not label them as support or resistance. State each as a single price."
-                            + yt_note
                         ),
                         image_path=tmp_png,
-                        attachment_text=attachment if attachment.strip() else None,
+                        attachment_text=csv_text if csv_text else None,
                     )
 
                     # Turn 2 — JSON extraction (flash-lite: fast + cheap)
@@ -517,6 +482,22 @@ class Handler(BaseHTTPRequestHandler):
 
             threading.Thread(target=_run, daemon=True).start()
             self._json({"ok": True, "pending": True})
+
+        elif path == "/api/youtube/transcript":
+            length = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(length)
+            try:
+                data = json.loads(body)
+            except json.JSONDecodeError:
+                self.send_error(400, "Invalid JSON")
+                return
+            url = data.get("url", "").strip()
+            if not url:
+                self.send_error(400, "url required")
+                return
+            from src.youtube import fetch_transcript
+            result = fetch_transcript(url)
+            self._json(result)
 
         elif path == "/api/snapshot/save":
             import base64
