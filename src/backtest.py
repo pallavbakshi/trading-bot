@@ -1074,7 +1074,7 @@ def _print_report(trades: list[dict], ticker: str, model: str,
 # ── Main ────────────────────────────────────────────────────────────────
 
 def _find_csv_path(ticker: str) -> Path | None:
-    for d in ["data", "data/nse"]:
+    for d in ["data/nse", "data/sp"]:
         p = Path(d) / f"{ticker.lower()}.csv"
         if p.exists():
             return p

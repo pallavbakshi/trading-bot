@@ -394,7 +394,7 @@ def main():
         from src.loader import load_csv
         ticker = args.ticker.upper()
         csv_path = None
-        for d in ["data", "data/nse"]:
+        for d in ["data/nse", "data/sp"]:
             for name in [f"{ticker.lower()}.csv",
                          f"{ticker.lower().replace('&', '_')}.csv"]:
                 candidate = Path(d) / name

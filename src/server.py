@@ -579,7 +579,7 @@ class Handler(BaseHTTPRequestHandler):
 def run_server(data_dirs: list[str] = None, results_paths: list[str] = None,
                host: str = "127.0.0.1", port: int = 8000, static_dir: str | None = None):
     if data_dirs is None:
-        data_dirs = ["data"]
+        data_dirs = ["data/nse", "data/sp"]
     if results_paths is None:
         results_paths = []
 
@@ -656,7 +656,7 @@ def run_server(data_dirs: list[str] = None, results_paths: list[str] = None,
 
 
 if __name__ == "__main__":
-    data_dirs = ["data"]
+    data_dirs = ["data/nse", "data/sp"]
     results_paths = ["results/patterns.json"]
     static_dir = None
 

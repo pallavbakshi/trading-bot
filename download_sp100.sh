@@ -18,7 +18,7 @@ for ticker in "${tickers[@]}"; do
   echo "=== Downloading $ticker ==="
   tv symbol "$ticker"
   tv goto 2010-01-01 --to 2026-03-05
-  tv download -o "$(echo "$ticker" | tr '[:upper:]' '[:lower:]').csv"
+  tv download -o "data/sp/$(echo "$ticker" | tr '[:upper:]' '[:lower:]').csv"
   echo "=== Done: $ticker ==="
   echo ""
   sleep 5

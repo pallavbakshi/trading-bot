@@ -62,6 +62,7 @@ mkdir -p $LOG_DIR
 echo "  → start server"
 PYTHONUNBUFFERED=1 nohup uv run python -m src.server \
     --data-dir data/nse \
+    --data-dir data/sp \
     --results results/nse/patterns.json \
     --static-dir web/dist \
     --port $PORT \

@@ -8,7 +8,7 @@ dev:
 
 # Python API server (port 8000)
 api:
-	uv run python -m src.server --data-dir data/nse --results results/nse/patterns.json
+	uv run python -m src.server --data-dir data/nse --data-dir data/sp --results results/nse/patterns.json
 
 # Vite frontend dev server
 web:
