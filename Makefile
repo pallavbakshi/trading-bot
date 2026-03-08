@@ -1,4 +1,4 @@
-.PHONY: dev api web scan install check-remote upload-data deploy refresh refresh-all refresh-nse refresh-sp
+.PHONY: dev api web scan install check-remote upload-data deploy tunnel refresh refresh-all refresh-nse refresh-sp
 
 # Start both API server and Vite dev server
 dev:
@@ -61,6 +61,10 @@ upload-data:
 	fi
 	@echo "Done."
 
-# Deploy to remote: push code, rsync data, rebuild, restart server + tunnel
+# Deploy to remote: push code, rsync data, rebuild, restart server (tunnel unaffected)
 deploy:
 	@bash scripts/deploy.sh
+
+# Start Cloudflare tunnel on remote (reuses existing tunnel if still running)
+tunnel:
+	@bash scripts/tunnel.sh

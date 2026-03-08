@@ -79,35 +79,10 @@ fi
 REMOTE
 ok "server running"
 
-# ── 4. Cloudflare tunnel ──────────────────────────────────────────────────────
-hdr "4. Cloudflare tunnel"
-ssh "$REMOTE" bash <<REMOTE
-set -euo pipefail
-export PATH="\$HOME/.local/bin:\$PATH"
-cd $REMOTE_DIR
-mkdir -p $LOG_DIR
-
-# Kill any existing tunnel
-pkill -f "cloudflared tunnel" 2>/dev/null || true
-sleep 1
-
-# Start ephemeral tunnel, capture URL
-nohup cloudflared tunnel --url http://localhost:$PORT \
-    > $LOG_DIR/cloudflared.log 2>&1 &
-
-echo "  waiting for tunnel URL..."
-for i in \$(seq 1 20); do
-    URL=\$(grep -o 'https://[a-zA-Z0-9.-]*\.trycloudflare\.com' $LOG_DIR/cloudflared.log 2>/dev/null | head -1 || true)
-    if [ -n "\$URL" ]; then
-        echo "TUNNEL_URL=\$URL"
-        break
-    fi
-    sleep 1
-done
-REMOTE
-
 echo ""
 printf "\033[32m\033[1mDeployed!\033[0m\n"
 echo ""
-echo "  Logs:   ssh $REMOTE 'tail -f $REMOTE_DIR/$LOG_DIR/server.log'"
+echo "  Logs:   ssh $REMOTE 'tail -f $REMOTE_DIR/.logs/server.log'"
 echo "  Status: ssh $REMOTE 'lsof -ti:$PORT'"
+echo ""
+echo "  Tunnel URL unchanged. Run 'make tunnel' to start/check the tunnel."
