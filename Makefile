@@ -1,4 +1,4 @@
-.PHONY: dev api web scan install check-remote upload-data deploy
+.PHONY: dev api web scan install check-remote upload-data deploy refresh refresh-all refresh-nse refresh-sp
 
 # Start both API server and Vite dev server
 dev:
@@ -29,6 +29,23 @@ scan:
 install:
 	uv sync
 	cd web && npm install
+
+# Refresh a single ticker's CSV data (requires tv bridge running)
+# Usage: make refresh TICKER=RELIANCE  or  make refresh TICKER=NSE:RELIANCE  or  make refresh TICKER=MSFT
+refresh:
+	uv run python -m src.refresh $(TICKER)
+
+# Refresh all tickers (NSE + SP)
+refresh-all:
+	uv run python -m src.refresh --all
+
+# Refresh only NSE tickers
+refresh-nse:
+	uv run python -m src.refresh --all --exchange nse
+
+# Refresh only S&P tickers
+refresh-sp:
+	uv run python -m src.refresh --all --exchange sp
 
 # Check remote server readiness (TA-Lib, Node, uv, cloudflared, disk, etc.)
 check-remote:
