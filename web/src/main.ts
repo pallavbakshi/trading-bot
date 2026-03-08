@@ -2657,8 +2657,11 @@ async function requestKeyLevels() {
   const vdrStart = bars[v0]?.date ?? "";
   const vdrEnd   = bars[v1]?.date ?? "";
 
+  const ytUrl = (document.getElementById("yt-url") as HTMLInputElement).value.trim();
+  const youtube_urls = ytUrl ? [ytUrl] : [];
+
   btn.disabled = true;
-  btn.textContent = "Analysing…";
+  btn.textContent = youtube_urls.length ? "Fetching transcript…" : "Analysing…";
   _llmCheckedKey = null;  // force fresh poll even if we already checked this key
 
   try {
@@ -2667,6 +2670,8 @@ async function requestKeyLevels() {
     const canvas = await html2canvas(el, { backgroundColor: "#ffffff", scale: 2 });
     const png = canvas.toDataURL("image/png");
     const csv = buildSnapshotCsv();
+
+    if (youtube_urls.length) btn.textContent = "Analysing…";
 
     const resp = await fetch("/api/keylevels", {
       method: "POST",
@@ -2682,6 +2687,7 @@ async function requestKeyLevels() {
         t_lookback: sliderIndex - v0,
         t_lookforward: v1 - sliderIndex,
         force: true,  // always re-run LLM, overwrite cache
+        youtube_urls,
       }),
     });
     const init = await resp.json();
