@@ -10,10 +10,12 @@
     "@tailwindcss/vite": "^4.2.1",
     "d3": "^7.9.0",
     "html2canvas": "^1.4.1",
+    "marked": "^17.0.4",
     "tailwindcss": "^4.2.1"
   },
   "devDependencies": {
     "@types/d3": "^7.4.3",
+    "@types/marked": "^5.0.2",
     "typescript": "^5.9.3",
     "vite": "^7.3.1"
   }

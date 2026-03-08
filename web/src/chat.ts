@@ -2,6 +2,10 @@
  * AI Chat drawer — right-side overlay panel.
  * Uses OpenRouter API for multi-model support with chart screenshot sharing.
  */
+import { marked } from "marked";
+
+// Render markdown safely — no HTML passthrough from user input
+marked.setOptions({ breaks: true });
 
 const MODELS = [
   { id: "google/gemini-3.1-flash-lite-preview", name: "Gemini 3.1 Flash Lite" },
@@ -289,7 +293,11 @@ function addBubble(role: "user" | "assistant", text: string, screenshot?: string
 
   const textEl = document.createElement("div");
   textEl.className = "chat-bubble-text";
-  textEl.textContent = text;
+  if (role === "assistant") {
+    textEl.innerHTML = marked.parse(text) as string;
+  } else {
+    textEl.textContent = text;
+  }
   bubble.appendChild(textEl);
 
   messagesEl.appendChild(bubble);
@@ -385,7 +393,7 @@ async function sendMessage() {
           const delta = parsed.choices?.[0]?.delta?.content;
           if (delta) {
             fullText += delta;
-            textEl.textContent = fullText;
+            textEl.innerHTML = marked.parse(fullText) as string;
             messagesEl.scrollTop = messagesEl.scrollHeight;
           }
         } catch { /* skip malformed chunks */ }
