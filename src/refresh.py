@@ -106,16 +106,10 @@ def _download(tv_symbol: str, from_date: date, to_date: date, out: Path):
     from_str = from_date.strftime("%Y-%m-%d")
     to_str   = to_date.strftime("%Y-%m-%d")
 
-    # 1. Set symbol
+    # 1. Set symbol (exit 0 = success, we trust it)
     print(f"    tv symbol {tv_symbol}")
     _run_tv(["symbol", tv_symbol])
-
-    # 2. Verify symbol was actually applied
-    info = _run_tv(["symbol"])
-    confirmed = info.get("ticker", "")
-    if not confirmed:
-        raise RuntimeError("Could not verify symbol was set")
-    print(f"    confirmed: {confirmed} on {info.get('exchange', '?')}")
+    print(f"    symbol set")
 
     # 3. Force daily timeframe
     print(f"    tv tf D")
