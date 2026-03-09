@@ -231,7 +231,8 @@ async function init() {
   // Mini overview bar (outside snapshot-region)
   const overviewContainer = document.getElementById("overview-container")!;
   initOverview(overviewContainer, (start, end) => {
-    visibleRange = [start, end];
+    visibleRange = [Math.max(0, start), Math.min(bars.length - 1, end)];
+    syncNavSlider();
     draw();
   });
 
