@@ -117,18 +117,22 @@ function render(visibleStart: number, visibleEnd: number) {
   ctx.lineWidth = 1.5;
   ctx.strokeRect(x0, 0, x1 - x0, H);
 
-  // Year labels along bottom
+  // Year labels — one per year, placed at the exact first bar of each year
   ctx.fillStyle = textColor;
   ctx.font = `9px monospace`;
   ctx.textAlign = "center";
+  const MIN_LABEL_GAP = 28; // px — skip label if previous one was too close
+  let lastLabelX = -MIN_LABEL_GAP;
   let lastYear = "";
-  const step = Math.max(1, Math.floor(n / 20));
-  for (let i = 0; i < n; i += step) {
+  for (let i = 0; i < n; i++) {
     const yr = allBars[i].date.slice(0, 4);
     if (yr !== lastYear) {
-      const x = iToX(i);
-      ctx.fillText(yr, x, H - 2);
       lastYear = yr;
+      const x = iToX(i);
+      if (x - lastLabelX >= MIN_LABEL_GAP) {
+        ctx.fillText(yr, x, H - 2);
+        lastLabelX = x;
+      }
     }
   }
 }
